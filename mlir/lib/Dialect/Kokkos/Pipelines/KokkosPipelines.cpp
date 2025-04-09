@@ -49,7 +49,13 @@ void mlir::kokkos::buildSparseKokkosCompiler(
   // Convert linalg.matmul ops to a blocked implementation (hardcoded 32x32 blocks for now)
   LinalgBlockPackMatmulOptions blockMatmulOptions;
   SmallVector<int64_t> blockFactors = {32, 32, 32};
+  SmallVector<int64_t> mnkOrder = {0, 1, 2};
+  //SmallVector<int64_t> mnkPaddedSizesNextMultipleOf = {32, 32, 32};
+
   blockMatmulOptions.blockFactors = blockFactors;
+  blockMatmulOptions.mnkOrder = mnkOrder;
+  //blockMatmulOptions.mnkPaddedSizesNextMultipleOf = mnkPaddedSizesNextMultipleOf;
+  blockMatmulOptions.allowPadding = false;
   blockMatmulOptions.lhsTransposeOuterBlocks = false;
   blockMatmulOptions.lhsTransposeInnerBlocks = false;
   blockMatmulOptions.rhsTransposeOuterBlocks = false;

@@ -15,7 +15,7 @@ struct LowerPackPattern : public OpRewritePattern<tensor::PackOp> {
 
   LogicalResult matchAndRewrite(tensor::PackOp op,
                                 PatternRewriter &rewriter) const override {
-    return result = linalg::lowerPack(rewriter, op);
+    return linalg::lowerPack(rewriter, op);
   }
 };
 

@@ -3344,6 +3344,12 @@ struct ArithBinaryInfixOperator<arith::XOrIOp>
   static std::string get() {return "^";}
 };
 
+template<>
+struct ArithBinaryInfixOperator<arith::RemUIOp>
+{
+  static std::string get() {return "%";}
+};
+
 template<typename T>
 static LogicalResult printBinaryInfixOperation(KokkosCppEmitter &emitter, T op) {
   if(failed(emitter.emitType(op.getLoc(), op.getResult().getType())))
@@ -3580,7 +3586,7 @@ LogicalResult KokkosCppEmitter::emitOperation(Operation &op, bool trailingSemico
               [&](auto op) { return printOperation(*this, op); })
           // Arithmetic ops: standard binary infix operators. All have the same syntax "result = lhs <operator> rhs;".
           // ArithBinaryInfixOperator<Op>::get() will provide the <operator>.
-          .Case<arith::AddFOp, arith::AddIOp, arith::SubFOp, arith::SubIOp, arith::MulFOp, arith::MulIOp, arith::DivFOp, arith::DivSIOp, arith::DivUIOp, arith::AndIOp, arith::OrIOp, arith::XOrIOp>(
+          .Case<arith::AddFOp, arith::AddIOp, arith::SubFOp, arith::SubIOp, arith::MulFOp, arith::MulIOp, arith::DivFOp, arith::DivSIOp, arith::DivUIOp, arith::AndIOp, arith::OrIOp, arith::XOrIOp, arith::RemUIOp>(
               [&](auto op) { return printBinaryInfixOperation(*this, op); })
           // Arithmetic ops: type casting that C++ compiler can handle automatically with implicit conversion: "result = operand;"
           .Case<arith::UIToFPOp, arith::FPToSIOp, arith::TruncFOp, arith::ExtFOp, arith::ExtSIOp, arith::ExtUIOp>(
