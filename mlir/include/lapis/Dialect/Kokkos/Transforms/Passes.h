@@ -33,6 +33,9 @@ std::unique_ptr<Pass> createKokkosDualViewManagementPass();
 
 std::unique_ptr<Pass> createSparseAssemblerDirectOutPass();
 
+void populateLowerPackUnpackPatterns(RewritePatternSet &patterns);
+std::unique_ptr<Pass> createLowerPackUnpackPass();
+
 //===----------------------------------------------------------------------===//
 // Registration.
 //===----------------------------------------------------------------------===//

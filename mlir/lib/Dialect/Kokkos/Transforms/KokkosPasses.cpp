@@ -27,6 +27,7 @@ namespace mlir {
 #define GEN_PASS_DEF_KOKKOSLOOPMAPPING
 #define GEN_PASS_DEF_KOKKOSMEMORYSPACEASSIGNMENT
 #define GEN_PASS_DEF_SPARSEASSEMBLERDIRECTOUT
+#define GEN_PASS_DEF_LOWERPACKUNPACK
 
 #include "lapis/Dialect/Kokkos/Transforms/Passes.h.inc"
 } // namespace mlir
@@ -91,6 +92,20 @@ struct SparseAssemblerDirectOutPass
     (void) applyPatternsAndFoldGreedily(getOperation(), std::move(patterns));
   }
 };
+
+struct LowerPackUnpackPass
+    : public impl::LowerPackUnpackBase<LowerPackUnpackPass> {
+
+  LowerPackUnpackPass() = default;
+  LowerPackUnpackPass(const LowerPackUnpackPass& pass) = default;
+
+  void runOnOperation() override {
+    auto *ctx = &getContext();
+    RewritePatternSet patterns(ctx);
+    populateLowerPackUnpackPatterns(patterns);
+    (void) applyPatternsAndFoldGreedily(getOperation(), std::move(patterns));
+  }
+};
 }
 
 std::unique_ptr<Pass> mlir::createParallelUnitStepPass()
@@ -113,3 +128,7 @@ std::unique_ptr<Pass> mlir::createSparseAssemblerDirectOutPass()
   return std::make_unique<SparseAssemblerDirectOutPass>();
 }
 
+std::unique_ptr<Pass> mlir::createLowerPackUnpackPass()
+{
+  return std::make_unique<LowerPackUnpackPass>();
+}

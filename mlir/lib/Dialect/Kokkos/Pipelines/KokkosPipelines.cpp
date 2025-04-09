@@ -46,6 +46,20 @@ void mlir::kokkos::buildSparseKokkosCompiler(
   pm.addPass(::mlir::createPartTensorConversionPass(options.partTensorBackend));
 #endif
 
+  // Convert linalg.matmul ops to a blocked implementation (hardcoded 32x32 blocks for now)
+  LinalgBlockPackMatmulOptions blockMatmulOptions;
+  SmallVector<int64_t> blockFactors = {32, 32, 32};
+  blockMatmulOptions.blockFactors = blockFactors;
+  blockMatmulOptions.lhsTransposeOuterBlocks = false;
+  blockMatmulOptions.lhsTransposeInnerBlocks = false;
+  blockMatmulOptions.rhsTransposeOuterBlocks = false;
+  blockMatmulOptions.rhsTransposeInnerBlocks = false;
+
+  pm.addPass(createLinalgBlockPackMatmul(blockMatmulOptions));
+
+  // And lower the pack/unpack ops resulting from that
+  pm.addPass(createLowerPackUnpackPass());
+
   // Rewrite named linalg ops into generic ops and apply fusion.
   pm.addNestedPass<func::FuncOp>(createLinalgGeneralizeNamedOpsPass());
 

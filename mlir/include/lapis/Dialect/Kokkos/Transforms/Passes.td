@@ -93,4 +93,18 @@ def SparseAssemblerDirectOut : Pass<"sparse-assembler-direct-out", "ModuleOp"> {
   ];  
 }
 
+def LowerPackUnpack : Pass<"lower-pack-unpack", "ModuleOp"> {
+  let summary = "Lower tensor.pack and tensor.unpack ops";
+  let description = [{
+    Lower tensor.pack and tensor.unpack ops that are generated when
+    converting a linalg.matmul op to a blocked implementation.
+  }]; 
+  let constructor = "mlir::createLowerPackUnpackPass()";
+  let dependentDialects = [ 
+    "bufferization::BufferizationDialect",
+    "linalg::LinalgDialect",
+    "tensor::TensorDialect",
+  ];  
+}
+
 #endif // MLIR_DIALECT_KOKKOS_TRANSFORMS_PASSES
