@@ -2532,16 +2532,10 @@ static LogicalResult printFunctionDeviceLevel(KokkosCppEmitter &emitter, func::F
       emitter << ".host_view());\n";
       // Keep the host view alive until lapis_finalize() is called.
       // Otherwise it would be deallocated as soon as this function returns.
-      std::string resultExpr;
       if(numResults == size_t(1))
-        resultExpr = "results";
+        emitter << "results.keepAliveHost();\n";
       else
-        resultExpr = "std::get<" + std::to_string(i) + ">(results)";
-      // If host and device memory alias each other, one of the views will be an unmanaged
-      // shallow copy of the other. Keep both host and device alive in this case.
-      emitter << "LAPIS::keepAlive(" << resultExpr << ".host_view());\n";
-      emitter << "if(" << resultExpr << ".host_view().data() == " << resultExpr << ".device_view().data()) \n";
-      emitter << "  LAPIS::keepAlive(" << resultExpr << ".device_view());\n";
+        emitter << "std::get<" << i << ">(results).keepAliveHost();\n";
     }
     else
     {
