@@ -2426,10 +2426,10 @@ static LogicalResult printFunctionDeviceLevel(KokkosCppEmitter &emitter, func::F
     auto retType = ftype.getResult(i);
     if(auto memrefType = dyn_cast<MemRefType>(retType))
     {
-      emitter << "StridedMemRefType<";
+      os << "LAPIS::MemRefType<";
       if (failed(emitter.emitType(loc, memrefType.getElementType())))
-        return func.emitError("Failed to emit result type as StridedMemRefType");
-      emitter << ", " << memrefType.getShape().size() << ">** ret" << i;
+        return functionOp.emitError("Failed to emit result type as LAPIS::MemRefType");
+      os << ", " << memrefType.getShape().size() << ">** ret" << i;
     }
     else
     {
@@ -2524,18 +2524,12 @@ static LogicalResult printFunctionDeviceLevel(KokkosCppEmitter &emitter, func::F
         emitter << "results.syncHost();\n";
       else
         emitter << "std::get<" << i << ">(results).syncHost();\n";
-      emitter << "**ret" << i << " = LAPIS::viewToStridedMemref(";
+      emitter << "**ret" << i << " = LAPIS::viewToLapisMemref(";
       if(numResults == size_t(1))
         emitter << "results";
       else
-        emitter << "std::get<" << i << ">(results)";
-      emitter << ".host_view());\n";
-      // Keep the host view alive until lapis_finalize() is called.
-      // Otherwise it would be deallocated as soon as this function returns.
-      if(numResults == size_t(1))
-        emitter << "results.keepAliveHost();\n";
-      else
-        emitter << "std::get<" << i << ">(results).keepAliveHost();\n";
+        os << "std::get<" << i << ">(results)";
+      os << ".host_view(), results.keepAliveHost());\n";
     }
     else
     {
@@ -2736,7 +2730,7 @@ static LogicalResult printFunctionDeviceLevel(KokkosCppEmitter &emitter, func::F
     if(auto memrefType = dyn_cast<MemRefType>(retType))
     {
       int rank = memrefType.hasRank() ? memrefType.getShape().size() : 1;
-      py_os << "ret" << i << " = ctypes.pointer(ctypes.pointer(rt.make_nd_memref_descriptor(" << rank << ", " << getCtypesType(memrefType.getElementType()) << ")()))\n";
+      py_os << "ret" << i << " = _make_lapis_memref(self, " << rank << ", " << getCtypesType(memrefType.getElementType()) << ")()\n";
     }
     else if(isa<LLVM::LLVMPointerType>(retType))
     {
@@ -2777,7 +2771,7 @@ static LogicalResult printFunctionDeviceLevel(KokkosCppEmitter &emitter, func::F
     }
     else if(isa<MemRefType>(retType))
     {
-      py_os << "ret" << i;
+      py_os << "ctypes.pointer(ctypes.pointer(ret" << i << "))";
     }
     else
     {
@@ -2813,7 +2807,7 @@ static LogicalResult printFunctionDeviceLevel(KokkosCppEmitter &emitter, func::F
   }
   py_os << ")\n";
   // Finally, generate the return statement.
-  // Note that in Python, a 1-elem tuple is equivalent to scalar.
+  // Note that we return a scalar if a single result is returned.
   if(numResults)
   {
     py_os << "return (";
@@ -2828,7 +2822,7 @@ static LogicalResult printFunctionDeviceLevel(KokkosCppEmitter &emitter, func::F
       }
       else if(isa<MemRefType>(retType))
       {
-        py_os << "rt.ranked_memref_to_numpy(ret" << i << "[0])";
+        py_os << "ret" << i << ".asnumpy()";
       }
       else if(auto structType = dyn_cast<LLVM::LLVMStructType>(retType)) {
         int idx = 0;
@@ -2840,7 +2834,7 @@ static LogicalResult printFunctionDeviceLevel(KokkosCppEmitter &emitter, func::F
         py_os << "ret" << i << "[0]";
       }
     }
-    py_os << ")\n";
+    py_os << ")\n\n";
   }
   py_os.unindent();
   return success();
@@ -4158,14 +4152,18 @@ LogicalResult KokkosCppEmitter::emitInitAndFinalize(bool finalizeKokkos = true)
       *this << "();\n";
     }
   }
+  if(!emittingTeamLevel() && finalizeKokkos)
+    os << "Kokkos::finalize();\n";
+  os.unindent();
+  os << "}\n\n";
+
   if(!emittingTeamLevel()) {
-    // Free views returned to Python
-    *this << "LAPIS::alives.clear();\n";
-    if(finalizeKokkos)
-      *this << "Kokkos::finalize();\n";
+    os << "extern \"C\" void freeKeepAlive(LAPIS::KeepAlive* handle)\n";
+    os << "{\n";
+    os << "  delete handle;\n";
+    os << "}\n";
   }
-  unindent();
-  *this << "}\n";
+
   return success();
 }
 
@@ -4185,18 +4183,55 @@ void KokkosCppEmitter::emitCppBoilerplate()
 void KokkosCppEmitter::emitPythonBoilerplate()
 {
   *py_os << "import ctypes\n";
+  *py_os << "import types\n";
   *py_os << "import numpy\n";
+  *py_os << "import functools\n";
+  *py_os << "import sys\n";
   *py_os << "from mlir import runtime as rt\n";
+  *py_os << "\n";
+  *py_os << "@functools.cache\n";
+  *py_os << "def _make_lapis_memref(module, rank, ctypes_type):\n";
+  *py_os << "  mlir_memref = rt.make_nd_memref_descriptor(rank, ctypes_type)\n";
+  *py_os << "\n";
+  *py_os << "  class LapisMemref(ctypes.Structure):\n";
+  *py_os << "    _ctype = ctypes_type\n";
+  *py_os << "\n";
+  *py_os << "    _fields_ = [\n";
+  *py_os << "      ('smr', mlir_memref),\n";
+  *py_os << "      ('keepAliveHandle', ctypes.c_void_p)\n";
+  *py_os << "    ]\n";
+  *py_os << "\n";
+  *py_os << "    def asctypes(self):\n";
+  *py_os << "      size = sum((size-1) for size in self.smr.shape) + self.smr.offset\n";
+  *py_os << "      buffer_type = self._ctype * size\n";
+  *py_os << "      ret = ctypes.cast(self.smr.aligned, ctypes.POINTER(buffer_type)).contents\n";
+  *py_os << "      ret.base = self\n";
+  *py_os << "      return ret\n";
+  *py_os << "\n";
+  *py_os << "    def asnumpy(self):\n";
+  *py_os << "      carray = self.asctypes()\n";
+  *py_os << "      obj = numpy.frombuffer(carray, dtype=self._ctype, offset=self.smr.offset * ctypes.sizeof(self._ctype))\n";
+  *py_os << "      ret = numpy.lib.stride_tricks.as_strided(\n";
+  *py_os << "        obj[self.smr.offset:],\n";
+  *py_os << "        shape=numpy.ctypeslib.as_array(self.smr.shape),\n";
+  *py_os << "        strides=numpy.ctypeslib.as_array(self.smr.strides) * obj.itemsize\n";
+  *py_os << "      )\n";
+  *py_os << "      return ret\n";
+  *py_os << "\n";
+  *py_os << "    def __del__(self):\n";
+  *py_os << "      module.libHandle.freeKeepAlive(ctypes.c_void_p(self.keepAliveHandle))\n";
+  *py_os << "\n";
+  *py_os << "  return LapisMemref\n";
+  *py_os << "\n";
   *py_os << "class LAPISModule:\n";
   *py_os << "  def __init__(self, libPath):\n";
-  //*py_os << "    print('Hello from LAPISModule.__init__!')\n";
   *py_os << "    self.libHandle = ctypes.CDLL(libPath)\n";
-  // Do all initialization immediately
-  //*py_os << "    print('Initializing module.')\n";
   *py_os << "    self.libHandle.lapis_initialize()\n";
-  //*py_os << "    print('Done initializing module.')\n";
+  *py_os << "\n";
   *py_os << "  def __del__(self):\n";
-  *py_os << "      self.libHandle.lapis_finalize()\n";
+  *py_os << "    self.libHandle.lapis_finalize()\n";
+  *py_os << "\n";
+
   //From here, only function wrappers are emitted.
   //These are class members so indent all of them now.
   py_os->indent();
