@@ -2426,10 +2426,10 @@ static LogicalResult printFunctionDeviceLevel(KokkosCppEmitter &emitter, func::F
     auto retType = ftype.getResult(i);
     if(auto memrefType = dyn_cast<MemRefType>(retType))
     {
-      os << "LAPIS::MemRefType<";
-      if (failed(emitter.emitType(loc, memrefType.getElementType())))
-        return functionOp.emitError("Failed to emit result type as LAPIS::MemRefType");
-      os << ", " << memrefType.getShape().size() << ">** ret" << i;
+      os << "LAPIS::PythonParameter<";
+      if (failed(emitter.emitMemrefType(loc, memrefType, kokkos::MemorySpace::DualView)))
+        return functionOp.emitError("Failed to emit result type as DualView");
+      os << ">** ret" << i;
     }
     else
     {
@@ -2447,13 +2447,14 @@ static LogicalResult printFunctionDeviceLevel(KokkosCppEmitter &emitter, func::F
     auto paramType = ftype.getInput(i);
     if(auto memrefType = dyn_cast<MemRefType>(paramType))
     {
-      emitter << "StridedMemRefType<";
-      if (failed(emitter.emitType(loc, memrefType.getElementType())))
-        return func.emitError("Failed to emit param type as StridedMemRefType");
-      emitter << ", " << memrefType.getShape().size() << ">* param" << i;
+      os << "LAPIS::PythonParameter<";
+      if (failed(emitter.emitMemrefType(loc, memrefType, kokkos::MemorySpace::DualView)))
+        return functionOp.emitError("Failed to emit param type as DualView");
+      os << ">* param" << i << "_wrapper";
     }
     else
     {
+      //TODO: Handle structs appropriately
       bool isStruct = isa<LLVM::LLVMStructType>(paramType);
       // Structs are passed by const reference
       if(isStruct) {
@@ -2475,7 +2476,11 @@ static LogicalResult printFunctionDeviceLevel(KokkosCppEmitter &emitter, func::F
   //emitter << "std::cout << \"Starting MLIR function on process \" << getpid() << '\\n';\n";
   //emitter << "std::cout << \"Optionally attach debugger now, then press <Enter> to continue: \";\n";
   //emitter << "std::cin.get();\n";
-  //Construct an unmanaged, LayoutRight Kokkos::View for each memref input parameter.
+  //Wrap each parameter in a PythonParameter wrapper.  If the parameter is a
+  //numpy array, the functions that use the parameters will create an unmanaged
+  //Kokkos::view.  If the parameter was already a PythonParameter wrapper, it
+  //will be passed through. 
+  //
   //Note: stridedMemrefToView with LayoutRight will check the strides at runtime,
   //and the python wrapper will use numpy.require to deep-copy the data to the correct
   //layout if it's not already.
@@ -2485,10 +2490,7 @@ static LogicalResult printFunctionDeviceLevel(KokkosCppEmitter &emitter, func::F
     auto memrefType = dyn_cast<MemRefType>(paramType);
     if(memrefType)
     {
-      emitter << "auto param" << i << "_smr = LAPIS::stridedMemrefToView<";
-      if(failed(emitter.emitMemrefType(loc, memrefType, kokkos::MemorySpace::Host)))
-        return func.emitError("Failed to emit memref type as host view");
-      emitter << ">(*param" << i << ");\n";
+      os << "auto param" << i << " = param" << i << "_wrapper->toView();\n";
     }
   }
   // Emit the call
@@ -2503,7 +2505,7 @@ static LogicalResult printFunctionDeviceLevel(KokkosCppEmitter &emitter, func::F
     auto memrefType = dyn_cast<MemRefType>(paramType);
     if(memrefType)
     {
-      emitter << "param" << i << "_smr";
+      emitter << "param" << i;
     }
     else
     {
@@ -2520,16 +2522,12 @@ static LogicalResult printFunctionDeviceLevel(KokkosCppEmitter &emitter, func::F
     auto memrefType = dyn_cast<MemRefType>(retType);
     if(memrefType)
     {
-      if(numResults == size_t(1))
-        emitter << "results.syncHost();\n";
-      else
-        emitter << "std::get<" << i << ">(results).syncHost();\n";
-      emitter << "**ret" << i << " = LAPIS::viewToLapisMemref(";
+      os << "new (*ret" << i << ") LAPIS::PythonParameter(";
       if(numResults == size_t(1))
         emitter << "results";
       else
         os << "std::get<" << i << ">(results)";
-      os << ".host_view(), results.keepAliveHost());\n";
+      os << ");\n";
     }
     else
     {
@@ -2618,8 +2616,7 @@ static LogicalResult printFunctionDeviceLevel(KokkosCppEmitter &emitter, func::F
   // NOTE: numpy.zeros(shape, dtype=...) already defaults to LayoutRight (and probably most other functions)
   // so in practice this shouldn't usually trigger a deep-copy.
   auto& py_os = emitter.py_ostream();
-  //NOTE: this function is a member of the module's class, but py_os is already indented to write methods.
-  py_os << "def " << funcName << "(self, ";
+  py_os << "def " << funcName << "(";
   for(size_t i = 0; i < numParams; i++)
   {
     if(i != 0)
@@ -2696,7 +2693,7 @@ static LogicalResult printFunctionDeviceLevel(KokkosCppEmitter &emitter, func::F
         std::string numpyDType = getNumpyType(memrefType.getElementType());
         if(!numpyDType.size())
           return func.emitError("Could not determine corresponding numpy type for memref element type");
-        py_os << "param" << i << " = numpy.require(param" << i << ", dtype=" << numpyDType << ", requirements=['C'])\n";
+        py_os << "param" << i << " = wrap_array_parameter(param" << i << ", dtype=" << numpyDType << ")\n";
       }
       else if(auto structType = dyn_cast<LLVM::LLVMStructType>(paramType)) {
         // Expect this parameter to be a tuple with the correct structure. Flatten it to a numpy array.
@@ -2711,7 +2708,7 @@ static LogicalResult printFunctionDeviceLevel(KokkosCppEmitter &emitter, func::F
         int flatIdx = 0;
         genStructFlatten("param" + std::to_string(i), "param_flat" + std::to_string(i), flatIdx, structType);
         // Replace original param with flattened version, as we don't need original anymore
-        py_os << "param" << i << " = param_flat" << i << "\n";
+        py_os << "param" << i << " = wrap_array_parameter(param_flat" << i << ", dtype=" << numpyDType << ")\n";
       }
       else {
         // Ensure scalars have the correct type.
@@ -2730,7 +2727,7 @@ static LogicalResult printFunctionDeviceLevel(KokkosCppEmitter &emitter, func::F
     if(auto memrefType = dyn_cast<MemRefType>(retType))
     {
       int rank = memrefType.hasRank() ? memrefType.getShape().size() : 1;
-      py_os << "ret" << i << " = _make_lapis_memref(self, " << rank << ", " << getCtypesType(memrefType.getElementType()) << ")()\n";
+      py_os << "ret" << i << " = ParameterWrapper.empty(" << getCtypesType(memrefType.getElementType()) << ")\n";
     }
     else if(isa<LLVM::LLVMPointerType>(retType))
     {
@@ -2745,7 +2742,7 @@ static LogicalResult printFunctionDeviceLevel(KokkosCppEmitter &emitter, func::F
       std::string numpyDType = getNumpyType(elem);
       if(!numpyDType.size())
         return func.emitError("Could not determine corresponding numpy type for result scalar type");
-      py_os << "ret" << i << " = numpy.zeros(" << size << ", dtype=" << numpyDType << ")\n";
+      py_os << "ret" << i << " = ParameterWrapper.empty(" << numpyDType << ")\n";
     }
     else
     {
@@ -2757,7 +2754,7 @@ static LogicalResult printFunctionDeviceLevel(KokkosCppEmitter &emitter, func::F
     }
   }
   // Generate the native call. It always returns void.
-  py_os << "self.libHandle.py_" << funcName << "(";
+  py_os << "libHandle.py_" << funcName << "(";
   // Outputs go first
   for(size_t i = 0; i < numResults; i++)
   {
@@ -2793,7 +2790,7 @@ static LogicalResult printFunctionDeviceLevel(KokkosCppEmitter &emitter, func::F
     else if(isa<MemRefType>(paramType))
     {
       //Numpy array (or a scalar from a numpy array)
-      py_os << "ctypes.pointer(rt.get_ranked_memref_descriptor(param" << i << "))";
+      py_os << "ctypes.pointer(param" << i << ")";
     }
     else if(isa<LLVM::LLVMStructType>(paramType))
     {
@@ -2822,7 +2819,7 @@ static LogicalResult printFunctionDeviceLevel(KokkosCppEmitter &emitter, func::F
       }
       else if(isa<MemRefType>(retType))
       {
-        py_os << "ret" << i << ".asnumpy()";
+        py_os << "ret" << i;
       }
       else if(auto structType = dyn_cast<LLVM::LLVMStructType>(retType)) {
         int idx = 0;
@@ -4044,18 +4041,6 @@ LogicalResult KokkosCppEmitter::emitOperation(Operation &op, bool trailingSemico
     return failure();
   if(!skipPrint) {
     *this << (trailingSemicolon ? ";\n" : "\n");
-    // If op produced any DualView typed memrefs,
-    // declare variables for its host and device views 
-    for(auto result : op.getResults()) {
-      if(auto memrefType = dyn_cast<MemRefType>(result.getType())) {
-        if(kokkos::getMemSpace(result) == kokkos::MemorySpace::DualView) {
-          if(skipPrint || !trailingSemicolon) {
-            return op.emitOpError("op produced at least one DualView, but op was emitted in a context where we can't declare v_d and v_h views");
-          }
-          declareDeviceHostViews(result);
-        }
-      }
-    }
   }
   return success();
 }
@@ -4066,7 +4051,22 @@ LogicalResult KokkosCppEmitter::emitInitAndFinalize(bool finalizeKokkos = true)
   selectDeclCppStream();
   *this << "extern \"C\" void lapis_initialize();\n";
   *this << "extern \"C\" void lapis_finalize();\n";
+  *this << "extern \"C\" void getHostData(StridedMemRefTypeBase* out, LAPIS::PythonParameterBase* in)\n";
+  *this << "extern \"C\" void freeDualView(LAPIS::DualViewBase* handle)\n";
   selectMainCppStream();
+  *this << "extern \"C\" void getHostData(StridedMemRefTypeBase* out, LAPIS::PythonParameterBase* in)\n";
+  *this << "{\n";
+  *this << "  assert(in->wrapper_type == LAPIS::PythonParameterBase::DUALVIEW_TYPE);\n";
+  *this << "  in->view->toStridedMemRef(out);\n";
+  *this << "}\n";
+  *this << "\n";
+
+  *this << "extern \"C\" void freeDualView(LAPIS::DualViewBase* handle)\n";
+  *this << "{\n";
+  *this << "  delete handle;\n";
+  *this << "}\n";
+  *this << "\n";
+
   *this << "extern \"C\" void lapis_initialize() {\n";
   indent();
   // lapis_initialize is never responsible for initializing Kokkos if we're
@@ -4182,59 +4182,99 @@ void KokkosCppEmitter::emitCppBoilerplate()
 
 void KokkosCppEmitter::emitPythonBoilerplate()
 {
+  *py_os << "import atexit\n";
   *py_os << "import ctypes\n";
-  *py_os << "import types\n";
-  *py_os << "import numpy\n";
+  *py_os << "import enum\n";
   *py_os << "import functools\n";
+  *py_os << "import os.path\n";
   *py_os << "import sys\n";
+  *py_os << "import types\n\n";
+  *py_os << "import numpy\n";
   *py_os << "from mlir import runtime as rt\n";
+  *py_os << "import os.path\n";
   *py_os << "\n";
-  *py_os << "@functools.cache\n";
-  *py_os << "def _make_lapis_memref(module, rank, ctypes_type):\n";
-  *py_os << "  mlir_memref = rt.make_nd_memref_descriptor(rank, ctypes_type)\n";
+  *py_os << "dirpath = os.path.dirname(os.path.abspath(__file__))\n";
+  *py_os << "modpath = os.path.join(dirpath, \"build\", f\"lib{__name__}_module.so\")\n";
+  *py_os << "if not os.path.isfile(modpath):\n";
+  *py_os << "  modpath = os.path.join(dirpath, \"build\", f\"lib{__name__}_module.dylib\")\n";
+  *py_os << "libHandle = ctypes.CDLL(modpath)\n";
+  *py_os << "libHandle.lapis_initialize()\n";
+  *py_os << "atexit.register(libHandle.lapis_finalize)\n";
   *py_os << "\n";
-  *py_os << "  class LapisMemref(ctypes.Structure):\n";
-  *py_os << "    _ctype = ctypes_type\n";
+  *py_os << "class ParameterWrapperType(enum.Enum):\n";
+  *py_os << "  EMPTY_TYPE = 0\n";
+  *py_os << "  STRIDED_MEMREF_TYPE = 1\n";
+  *py_os << "  DUALVIEW_TYPE = 2\n";
   *py_os << "\n";
-  *py_os << "    _fields_ = [\n";
-  *py_os << "      ('smr', mlir_memref),\n";
-  *py_os << "      ('keepAliveHandle', ctypes.c_void_p)\n";
-  *py_os << "    ]\n";
+  *py_os << "class ParameterWrapper(ctypes.Structure):\n";
+  *py_os << "  _fields_ = [\n";
+  *py_os << "    ('wrapper_type', ctypes.c_int32),\n";
+  *py_os << "    ('rank', ctypes.c_int32),\n";
+  *py_os << "    ('ptr', ctypes.c_void_p),\n";
+  *py_os << "  ]\n";
   *py_os << "\n";
-  *py_os << "    def asctypes(self):\n";
-  *py_os << "      size = sum((size-1) for size in self.smr.shape) + self.smr.offset\n";
-  *py_os << "      buffer_type = self._ctype * size\n";
-  *py_os << "      ret = ctypes.cast(self.smr.aligned, ctypes.POINTER(buffer_type)).contents\n";
-  *py_os << "      ret.base = self\n";
-  *py_os << "      return ret\n";
+  *py_os << "  @classmethod\n";
+  *py_os << "  def build(cls, wrapper_type, ptr, dtype, rank, base=None):\n";
+  *py_os << "    ret = cls()\n";
+  *py_os << "    ret.wrapper_type = wrapper_type.value\n";
+  *py_os << "    ret.ptr = ctypes.cast(ptr, ctypes.c_void_p)\n";
+  *py_os << "    ret.rank = rank\n";
+  *py_os << "    ret.base = base #ties lifespan of base to this object\n";
+  *py_os << "    ret._ctype = numpy.ctypeslib.as_ctypes_type(dtype)\n";
+  *py_os << "    return ret\n";
   *py_os << "\n";
-  *py_os << "    def asnumpy(self):\n";
-  *py_os << "      carray = self.asctypes()\n";
-  *py_os << "      obj = numpy.frombuffer(carray, dtype=self._ctype, offset=self.smr.offset * ctypes.sizeof(self._ctype))\n";
-  *py_os << "      ret = numpy.lib.stride_tricks.as_strided(\n";
-  *py_os << "        obj[self.smr.offset:],\n";
-  *py_os << "        shape=numpy.ctypeslib.as_array(self.smr.shape),\n";
-  *py_os << "        strides=numpy.ctypeslib.as_array(self.smr.strides) * obj.itemsize\n";
-  *py_os << "      )\n";
-  *py_os << "      return ret\n";
+  *py_os << "  @classmethod\n";
+  *py_os << "  def empty(cls, dtype, rank=0):\n";
+  *py_os << "    ret = cls()\n";
+  *py_os << "    ret.wrapper_type = ParameterWrapperType.EMPTY_TYPE.value\n";
+  *py_os << "    ret.ptr = ctypes.c_void_p(0)\n";
+  *py_os << "    ret.rank = rank\n";
+  *py_os << "    ret._ctype = numpy.ctypeslib.as_ctypes_type(dtype)\n";
+  *py_os << "    return ret\n";
   *py_os << "\n";
-  *py_os << "    def __del__(self):\n";
-  *py_os << "      module.libHandle.freeKeepAlive(ctypes.c_void_p(self.keepAliveHandle))\n";
+  *py_os << "  def asmemref(self):\n";
+  *py_os << "    ret_type = rt.make_nd_memref_descriptor(self.rank, self._ctype)\n";
+  *py_os << "    if self.wrapper_type == ParameterWrapperType.STRIDED_MEMREF_TYPE.value:\n";
+  *py_os << "      ret = ctypes.cast(self.ptr, ctypes.POINTER(ret_type)).contents\n";
+  *py_os << "    elif self.wrapper_type == ParameterWrapperType.DUALVIEW_TYPE.value:\n";
+  *py_os << "      ret = ret_type()\n";
+  *py_os << "      libHandle.getHostData(ctypes.pointer(ret), ctypes.pointer(self))\n";
+  *py_os << "    ret.base = self # ties lifespan of this object to strided memref ret\n";
+  *py_os << "    return ret\n";
   *py_os << "\n";
-  *py_os << "  return LapisMemref\n";
+  *py_os << "  def asctypes(self):\n";
+  *py_os << "    smr = self.asmemref()\n";
+  *py_os << "    size = sum((size-1) for size in smr.shape) + smr.offset\n";
+  *py_os << "    buffer_type = self._ctype * size\n";
+  *py_os << "    ret = ctypes.cast(smr.aligned, ctypes.POINTER(buffer_type)).contents\n";
+  *py_os << "    ret.base = self # ties lifespan of this object to ctypes array ret\n";
+  *py_os << "    return ret\n";
   *py_os << "\n";
-  *py_os << "class LAPISModule:\n";
-  *py_os << "  def __init__(self, libPath):\n";
-  *py_os << "    self.libHandle = ctypes.CDLL(libPath)\n";
-  *py_os << "    self.libHandle.lapis_initialize()\n";
+  *py_os << "  def asnumpy(self):\n";
+  *py_os << "    smr = self.asmemref()\n";
+  *py_os << "    carray = self.asctypes()\n";
+  *py_os << "    # numpy ties lifespan of carray to numpy arrays created by frombuffer\n";
+  *py_os << "    obj = numpy.frombuffer(carray, dtype=self._ctype, offset=smr.offset * ctypes.sizeof(self._ctype))\n";
+  *py_os << "    ret = numpy.lib.stride_tricks.as_strided(\n";
+  *py_os << "      obj[smr.offset:],\n";
+  *py_os << "      shape=numpy.ctypeslib.as_array(smr.shape),\n";
+  *py_os << "      strides=numpy.ctypeslib.as_array(smr.strides) * obj.itemsize\n";
+  *py_os << "    )\n";
+  *py_os << "    return ret\n";
   *py_os << "\n";
   *py_os << "  def __del__(self):\n";
-  *py_os << "    self.libHandle.lapis_finalize()\n";
+  *py_os << "    if self.wrapper_type == ParameterWrapperType.DUALVIEW_TYPE.value:\n";
+  *py_os << "      libHandle.freeDualView(ctypes.c_void_p(self.ptr))\n";
+  *py_os << "\n";
+  *py_os << "def wrap_array_parameter(param, dtype):\n";
+  *py_os << "  if isinstance(param, numpy.ndarray):\n";
+  *py_os << "    param = numpy.require(param, dtype=dtype, requirements=['C'])\n";
+  *py_os << "    ptr = ctypes.pointer(rt.get_ranked_memref_descriptor(param))\n";
+  *py_os << "    return ParameterWrapper.build(ParameterWrapperType.STRIDED_MEMREF_TYPE, ptr, dtype, param.ndim, base=param)\n";
+  *py_os << "  else:\n";
+  *py_os << "    return param\n";
   *py_os << "\n";
 
-  //From here, only function wrappers are emitted.
-  //These are class members so indent all of them now.
-  py_os->indent();
 }
 
 LogicalResult KokkosCppEmitter::emitType(Location loc, Type type, bool forSparseRuntime) {
