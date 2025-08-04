@@ -2426,10 +2426,10 @@ static LogicalResult printFunctionDeviceLevel(KokkosCppEmitter &emitter, func::F
     auto retType = ftype.getResult(i);
     if(auto memrefType = dyn_cast<MemRefType>(retType))
     {
-      os << "LAPIS::PythonParameter<";
+      emitter << "LAPIS::PythonParameter<";
       if (failed(emitter.emitMemrefType(loc, memrefType, kokkos::MemorySpace::DualView)))
-        return functionOp.emitError("Failed to emit result type as DualView");
-      os << ">** ret" << i;
+        return func.emitError("Failed to emit result type as DualView");
+      emitter << ">** ret" << i;
     }
     else
     {
@@ -2447,10 +2447,10 @@ static LogicalResult printFunctionDeviceLevel(KokkosCppEmitter &emitter, func::F
     auto paramType = ftype.getInput(i);
     if(auto memrefType = dyn_cast<MemRefType>(paramType))
     {
-      os << "LAPIS::PythonParameter<";
+      emitter << "LAPIS::PythonParameter<";
       if (failed(emitter.emitMemrefType(loc, memrefType, kokkos::MemorySpace::DualView)))
-        return functionOp.emitError("Failed to emit param type as DualView");
-      os << ">* param" << i << "_wrapper";
+        return func.emitError("Failed to emit param type as DualView");
+      emitter << ">* param" << i << "_wrapper";
     }
     else
     {
@@ -2490,7 +2490,7 @@ static LogicalResult printFunctionDeviceLevel(KokkosCppEmitter &emitter, func::F
     auto memrefType = dyn_cast<MemRefType>(paramType);
     if(memrefType)
     {
-      os << "auto param" << i << " = param" << i << "_wrapper->toView();\n";
+      emitter << "auto param" << i << " = param" << i << "_wrapper->toView();\n";
     }
   }
   // Emit the call
@@ -2522,12 +2522,12 @@ static LogicalResult printFunctionDeviceLevel(KokkosCppEmitter &emitter, func::F
     auto memrefType = dyn_cast<MemRefType>(retType);
     if(memrefType)
     {
-      os << "new (*ret" << i << ") LAPIS::PythonParameter(";
+      emitter << "new (*ret" << i << ") LAPIS::PythonParameter(";
       if(numResults == size_t(1))
         emitter << "results";
       else
-        os << "std::get<" << i << ">(results)";
-      os << ");\n";
+        emitter << "std::get<" << i << ">(results)";
+      emitter << ");\n";
     }
     else
     {
@@ -2726,7 +2726,7 @@ static LogicalResult printFunctionDeviceLevel(KokkosCppEmitter &emitter, func::F
     auto retType = ftype.getResult(i);
     if(auto memrefType = dyn_cast<MemRefType>(retType))
     {
-      int rank = memrefType.hasRank() ? memrefType.getShape().size() : 1;
+      //int rank = memrefType.hasRank() ? memrefType.getShape().size() : 1;
       py_os << "ret" << i << " = ParameterWrapper.empty(" << getCtypesType(memrefType.getElementType()) << ")\n";
     }
     else if(isa<LLVM::LLVMPointerType>(retType))
@@ -2738,7 +2738,7 @@ static LogicalResult printFunctionDeviceLevel(KokkosCppEmitter &emitter, func::F
       Type elem = kokkos::getStructElementType(structType);
       if(!elem)
         return func.emitError("Cannot yet pass structs with multiple element types to/from Python");
-      int size = kokkos::getStructElementCount(structType);
+      //int size = kokkos::getStructElementCount(structType);
       std::string numpyDType = getNumpyType(elem);
       if(!numpyDType.size())
         return func.emitError("Could not determine corresponding numpy type for result scalar type");
@@ -4051,8 +4051,8 @@ LogicalResult KokkosCppEmitter::emitInitAndFinalize(bool finalizeKokkos = true)
   selectDeclCppStream();
   *this << "extern \"C\" void lapis_initialize();\n";
   *this << "extern \"C\" void lapis_finalize();\n";
-  *this << "extern \"C\" void getHostData(StridedMemRefTypeBase* out, LAPIS::PythonParameterBase* in)\n";
-  *this << "extern \"C\" void freeDualView(LAPIS::DualViewBase* handle)\n";
+  *this << "extern \"C\" void getHostData(StridedMemRefTypeBase* out, LAPIS::PythonParameterBase* in);\n";
+  *this << "extern \"C\" void freeDualView(LAPIS::DualViewBase* handle);\n";
   selectMainCppStream();
   *this << "extern \"C\" void getHostData(StridedMemRefTypeBase* out, LAPIS::PythonParameterBase* in)\n";
   *this << "{\n";
@@ -4156,13 +4156,6 @@ LogicalResult KokkosCppEmitter::emitInitAndFinalize(bool finalizeKokkos = true)
     os << "Kokkos::finalize();\n";
   os.unindent();
   os << "}\n\n";
-
-  if(!emittingTeamLevel()) {
-    os << "extern \"C\" void freeKeepAlive(LAPIS::KeepAlive* handle)\n";
-    os << "{\n";
-    os << "  delete handle;\n";
-    os << "}\n";
-  }
 
   return success();
 }
