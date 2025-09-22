@@ -4,6 +4,13 @@
 #include <unistd.h>
 #include <iostream>
 
+#ifdef LAPIS_USE_KOKKOSKERNELS
+#include "KokkosSparse_CrsMatrix.hpp"
+#include "KokkosSparse_spmv.hpp"
+#include "KokkosBlas3_gemm.hpp"
+#include "KokkosBlas2_gemv.hpp"
+#endif
+
 template <typename T, int N>
 struct StridedMemRefType {
   T *basePtr;
@@ -433,5 +440,35 @@ namespace LAPIS
     while(vector_length < max_vector_length && vector_length * 6 < par) vector_length *= 2;
     return vector_length;
   }
+
+#ifdef LAPIS_USE_KOKKOSKERNELS
+  template<typename Shape, typename Rowptrs, typename Entries, typename AValues, typename XVector, typename YVector>
+  void spmv(const Shape& shape, const Rowptrs& rowptrs, const Entries& entries, const AValues& avalues, const XVector& x, const YVector& y)
+  {
+    // Deduce types
+    using Offset = typename Rowptrs::non_const_value_type;
+    using Ordinal = typename Entries::non_const_value_type;
+    using Scalar = typename AValues::non_const_value_type;
+    using Device = Kokkos::DefaultExecutionSpace;
+    using CrsMat = KokkosSparse::CrsMatrix<Scalar, Ordinal, Device, void, Offset>;
+    Ordinal m = shape.m0[0];
+    Ordinal n = shape.m0[1];
+    Offset nnz = shape.m1[2];
+    CrsMat A("A", m, n, nnz, avalues, rowptrs, entries);
+    KokkosSparse::spmv("N", 1.0, A, x, 0.0, y);
+  }
+
+  template<typename AMatrix, typename BMatrix, typename CMatrix>
+  void gemm(const AMatrix& a, const BMatrix& b, const CMatrix& c)
+  {
+    KokkosBlas::gemm("N", "N", 1.0, a, b, 0.0, c);
+  }
+
+  template<typename AMatrix, typename XVector, typename YVector>
+  void gemv(const AMatrix& a, const XVector& x, const YVector& y)
+  {
+    KokkosBlas::gemv("N", 1.0, a, x, 0.0, y);
+  }
+#endif
 } // namespace LAPIS
 

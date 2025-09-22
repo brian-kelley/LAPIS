@@ -59,6 +59,10 @@ struct LapisCompilerOptions
     *this, "decompose-sparse-tensors",
     desc("Decompose sparse tensors into memrefs (default off)"), init(false)};
 
+  PassOptions::Option<bool> useKK{
+    *this, "use-kokkoskernels",
+    desc("Replace linalg ops with KokkosKernels library calls where possible"), init(false)};
+
 #ifdef LAPIS_ENABLE_PART_TENSOR
   PassOptions::Option<mlir::PartTensorDistBackend> partTensorBackend{
       *this, "pt-backend",

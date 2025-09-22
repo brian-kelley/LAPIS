@@ -13,6 +13,14 @@ def TransposeConstantFoldPass : Pass<"fold-constant-transpose"> {
   let constructor = "mlir::createTransposeConstantFoldPass()";
 }
 
+def LinalgToKKPass : Pass<"linalg-to-kokkoskernels", "func::FuncOp"> {
+  let summary = "Replace supported Linalg ops with library calls to KokkosKernels";
+  let dependentDialects = [
+    "linalg::LinalgDialect", "sparse_tensor::SparseTensorDialect", "func::FuncDialect", "emitc::EmitCDialect"
+  ];
+  let constructor = "mlir::createLinalgToKKPass()";
+}
+
 def DenseLinalgToParallelLoops : Pass<"dense-linalg-to-parallel-loops"> {
   let summary = "Rewrite dense linalg.generic operations to scf.parallel loop nests";
   let dependentDialects = [

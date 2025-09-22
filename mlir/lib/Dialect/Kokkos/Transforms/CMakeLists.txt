@@ -1,5 +1,6 @@
 add_mlir_dialect_library(MLIRKokkosTransforms
   TransposeConstantFold.cpp
+  LinalgToKK.cpp
   DenseLinalgToParallelLoops.cpp
   MemrefResultsToParams.cpp
   MemrefCopyToParallel.cpp

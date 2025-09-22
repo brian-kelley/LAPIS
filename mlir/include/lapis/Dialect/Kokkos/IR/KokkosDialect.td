@@ -335,4 +335,28 @@ def AllocScratchOp : Kokkos_Op<"alloc_scratch">
   let hasVerifier = 1;
 }
 
+def GemmOp : Kokkos_Op<"gemm">
+{
+  let summary = "KokkosKernels gemm";
+  let arguments = (ins AnyMemRef:$A, AnyMemRef:$B, AnyMemRef:$Cin);
+  let results = (outs AnyMemRef:$Cout);
+  let hasVerifier = 0;
+}
+
+def GemvOp : Kokkos_Op<"gemv">
+{
+  let summary = "KokkosKernels gemv";
+  let arguments = (ins AnyMemRef:$A, AnyMemRef:$x, AnyMemRef:$yin);
+  let results = (outs AnyMemRef:$yout);
+  let hasVerifier = 0;
+}
+
+def SpmvOp : Kokkos_Op<"spmv">
+{
+  let summary = "KokkosKernels spmv";
+  let arguments = (ins AnyMemRef:$A, AnyMemRef:$x, AnyMemRef:$yin);
+  let results = (outs AnyMemRef:$yout);
+  let hasVerifier = 0;
+}
+
 #endif
