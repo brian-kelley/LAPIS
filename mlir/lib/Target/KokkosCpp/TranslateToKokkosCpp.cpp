@@ -2107,6 +2107,66 @@ static LogicalResult printOperation(KokkosCppEmitter &emitter, kokkos::AllocScra
   return success();
 }
 
+static LogicalResult printOperation(KokkosCppEmitter &emitter, kokkos::GemvOp op) {
+  auto loc = op.getLoc();
+  auto A = op.getA();
+  auto x = op.getX();
+  auto yin = op.getYin();
+  kokkos::MemorySpace Aspace = kokkos::getMemSpace(A, emitter.emittingTeamLevel());
+  kokkos::MemorySpace xspace = kokkos::getMemSpace(x, emitter.emittingTeamLevel());
+  kokkos::MemorySpace yinspace = kokkos::getMemSpace(yin, emitter.emittingTeamLevel());
+  // Call gemv
+  emitter << "LAPIS::gemv(";
+  (void) emitter.emitValue(A);
+  if(Aspace == kokkos::MemorySpace::DualView)
+    emitter << ".device_view()";
+  emitter << ", ";
+  (void) emitter.emitValue(x);
+  if(xspace == kokkos::MemorySpace::DualView)
+    emitter << ".device_view()";
+  emitter << ", ";
+  (void) emitter.emitValue(yin);
+  if(yinspace == kokkos::MemorySpace::DualView)
+    emitter << ".device_view()";
+  emitter << ");\n";
+  auto resultType = dyn_cast<MemRefType>(yin.getType());
+  if (failed(emitter.emitMemrefType(loc, resultType, yinspace)))
+    return failure();
+  emitter << ' ' << emitter.getOrCreateName(op.getResult()) << " = ";
+  (void) emitter.emitValue(yin);
+  return success();
+}
+
+static LogicalResult printOperation(KokkosCppEmitter &emitter, kokkos::GemmOp op) {
+  auto loc = op.getLoc();
+  auto A = op.getA();
+  auto B = op.getB();
+  auto Cin = op.getCin();
+  kokkos::MemorySpace Aspace = kokkos::getMemSpace(A, emitter.emittingTeamLevel());
+  kokkos::MemorySpace Bspace = kokkos::getMemSpace(B, emitter.emittingTeamLevel());
+  kokkos::MemorySpace Cinspace = kokkos::getMemSpace(Cin, emitter.emittingTeamLevel());
+  // Call gemv
+  emitter << "LAPIS::gemm(";
+  (void) emitter.emitValue(A);
+  if(Aspace == kokkos::MemorySpace::DualView)
+    emitter << ".device_view()";
+  emitter << ", ";
+  (void) emitter.emitValue(B);
+  if(Bspace == kokkos::MemorySpace::DualView)
+    emitter << ".device_view()";
+  emitter << ", ";
+  (void) emitter.emitValue(Cin);
+  if(Cinspace == kokkos::MemorySpace::DualView)
+    emitter << ".device_view()";
+  emitter << ");\n";
+  auto resultType = dyn_cast<MemRefType>(Cin.getType());
+  if (failed(emitter.emitMemrefType(loc, resultType, Cinspace)))
+    return failure();
+  emitter << ' ' << emitter.getOrCreateName(op.getResult()) << " = ";
+  (void) emitter.emitValue(Cin);
+  return success();
+}
+
 /// Matches a block containing a "simple" reduction. The expected shape of the
 /// block is as follows.
 ///
@@ -4044,7 +4104,7 @@ LogicalResult KokkosCppEmitter::emitOperation(Operation &op, bool trailingSemico
           .Case<
             kokkos::RangeParallelOp, kokkos::TeamParallelOp, kokkos::ThreadParallelOp,
             kokkos::TeamBarrierOp, kokkos::SingleOp, kokkos::UpdateReductionOp, kokkos::SyncOp, kokkos::ModifyOp, kokkos::YieldOp,
-            kokkos::AllocScratchOp>(
+            kokkos::AllocScratchOp, kokkos::GemvOp, kokkos::GemmOp>(
               [&](auto op) { return printOperation(*this, op); })
           // CF ops.
           .Case<cf::AssertOp>(

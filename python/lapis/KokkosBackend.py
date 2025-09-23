@@ -10,7 +10,7 @@ from shutil import which
 class KokkosBackend:
     """Main entry-point for the Kokkos backend for linalg-on-tensors dense/sparse code."""
 
-    def __init__(self, decompose_tensors = False, parallel_strategy="any-storage-any-loop", dump_mlir = False, index_instance=0, num_instances=0, ws = os.getcwd()):
+    def __init__(self, decompose_tensors = False, parallel_strategy="any-storage-any-loop", dump_mlir = False, use_kokkoskernels = False, index_instance=0, num_instances=0, ws = os.getcwd()):
         super().__init__()
         self.dump_mlir = dump_mlir
         self.ws = ws
@@ -18,6 +18,7 @@ class KokkosBackend:
         self.num_instances = num_instances
         self.decompose_tensors = decompose_tensors
         self.parallel_strategy = parallel_strategy
+        self.use_kokkoskernels = use_kokkoskernels
         if self.index_instance == 0:
             self.package_name = "lapis_package"
         else:
@@ -98,6 +99,8 @@ class KokkosBackend:
             pipeline = f'--sparse-compiler-kokkos=parallelization-strategy={par} decompose-sparse-tensors'
         else:
             pipeline = f'--sparse-compiler-kokkos=parallelization-strategy={par}'
+        if self.use_kokkoskernels:
+            pipeline = pipeline + " use-kokkoskernels"
         moduleLowered = ""
         try:
             moduleLowered = self.run_cli("lapis-opt", [pipeline], moduleText)

@@ -608,6 +608,10 @@ static MemorySpace getMemSpaceImpl(Value v, bool teamLevel) {
       // Direct element access outside of any parallel loop must be on host.
       hostRepresented = true;
     }
+    else if (isa<kokkos::GemvOp, kokkos::GemmOp>(usingOp)) {
+      // KokkosKernels calls always run on device
+      deviceRepresented = true;
+    }
     else if(isViewAliasingOp(usingOp) && v == usingOp->getOperand(0)) {
       // usingOp does not directly access v's memory, but its result can be accessed.
       // Recursively find the usages of this result too.
@@ -756,6 +760,16 @@ DenseSet<Value> getMemrefsRead(Operation *op, kokkos::ExecutionSpace space) {
       memrefs.insert(load.getMemref());
     else if (auto atomicUpdate = dyn_cast<memref::AtomicRMWOp>(subOp))
       memrefs.insert(atomicUpdate.getMemref());
+    else if (auto gemv = dyn_cast<kokkos::GemvOp>(subOp)) {
+      memrefs.insert(gemv.getA());
+      memrefs.insert(gemv.getX());
+      memrefs.insert(gemv.getYin());
+    }
+    else if (auto gemm = dyn_cast<kokkos::GemmOp>(subOp)) {
+      memrefs.insert(gemm.getA());
+      memrefs.insert(gemm.getB());
+      memrefs.insert(gemm.getCin());
+    }
     else if (auto call = dyn_cast<func::CallOp>(subOp)) {
       // Assume that all memref-typed arguments can be read by the callee.
       for (Value arg : call.getArgOperands()) {
@@ -778,6 +792,10 @@ DenseSet<Value> getMemrefsWritten(Operation *op, kokkos::ExecutionSpace space) {
       memrefs.insert(store.getMemref());
     else if (auto atomicUpdate = dyn_cast<memref::AtomicRMWOp>(subOp))
       memrefs.insert(atomicUpdate.getMemref());
+    else if (auto gemv = dyn_cast<kokkos::GemvOp>(subOp))
+      memrefs.insert(gemv.getYin());
+    else if (auto gemm = dyn_cast<kokkos::GemmOp>(subOp))
+      memrefs.insert(gemm.getCin());
     else if (auto call = dyn_cast<func::CallOp>(subOp)) {
       // Assume that all memref-typed arguments can be written to by the callee,
       // since memrefs of const data cannot be represented in MLIR.

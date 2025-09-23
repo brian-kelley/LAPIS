@@ -16,9 +16,25 @@ def TransposeConstantFoldPass : Pass<"fold-constant-transpose"> {
 def LinalgToKKPass : Pass<"linalg-to-kokkoskernels", "func::FuncOp"> {
   let summary = "Replace supported Linalg ops with library calls to KokkosKernels";
   let dependentDialects = [
-    "linalg::LinalgDialect", "sparse_tensor::SparseTensorDialect", "func::FuncDialect", "emitc::EmitCDialect"
+    "linalg::LinalgDialect", "sparse_tensor::SparseTensorDialect", "func::FuncDialect"
   ];
   let constructor = "mlir::createLinalgToKKPass()";
+}
+
+def LAPISSparseCodegenPass : Pass<"lapis-sparse-codegen"> {
+  let summary = "Decompose sparse tensor structures into memrefs";
+  let dependentDialects = [
+    "linalg::LinalgDialect", "sparse_tensor::SparseTensorDialect", "func::FuncDialect"
+  ];
+  let constructor = "mlir::createLAPISSparseCodegenPass()";
+}
+
+def LAPISSparsificationAndBufferizationPass : Pass<"lapis-sparsification-bufferization", "ModuleOp"> {
+  let summary = "Replace supported Linalg ops with library calls to KokkosKernels";
+  let dependentDialects = [
+    "linalg::LinalgDialect", "sparse_tensor::SparseTensorDialect", "func::FuncDialect"
+  ];
+  //let constructor = "mlir::createLAPISSparsificationAndBufferizationPass()";
 }
 
 def DenseLinalgToParallelLoops : Pass<"dense-linalg-to-parallel-loops"> {

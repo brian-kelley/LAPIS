@@ -455,19 +455,19 @@ namespace LAPIS
     Ordinal n = shape.m0[1];
     Offset nnz = shape.m1[2];
     CrsMat A("A", m, n, nnz, avalues, rowptrs, entries);
-    KokkosSparse::spmv("N", 1.0, A, x, 0.0, y);
+    KokkosSparse::spmv("N", 1.0, A, x, 1.0, y);
   }
 
   template<typename AMatrix, typename BMatrix, typename CMatrix>
   void gemm(const AMatrix& a, const BMatrix& b, const CMatrix& c)
   {
-    KokkosBlas::gemm("N", "N", 1.0, a, b, 0.0, c);
+    KokkosBlas::gemm("N", "N", 1.0, a, b, 1.0, c);
   }
 
   template<typename AMatrix, typename XVector, typename YVector>
   void gemv(const AMatrix& a, const XVector& x, const YVector& y)
   {
-    KokkosBlas::gemv("N", 1.0, a, x, 0.0, y);
+    KokkosBlas::gemv("N", 1.0, a, x, 1.0, y);
   }
 #endif
 } // namespace LAPIS

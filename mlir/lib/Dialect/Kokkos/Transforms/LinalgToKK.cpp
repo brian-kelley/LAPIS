@@ -2,6 +2,7 @@
 
 #include "lapis/Dialect/Kokkos/IR/KokkosDialect.h"
 #include "lapis/Dialect/Kokkos/Transforms/Passes.h"
+#include "mlir/IR/AffineMap.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Transforms/Transforms.h"
 #include "mlir/Dialect/SparseTensor/IR/SparseTensor.h"
@@ -32,63 +33,119 @@ static bool isDenseTensor(Value v) {
   return sTp.getDimRank() == sTp.getLvlRank() && sTp.isAllDense();
 }
 
+/// Helper to detect a * b with arguments taken from given block.
+static bool matchMulOfArgs(Block *block, Value val) {
+  if (auto *def = val.getDefiningOp()) {
+    if (isa<arith::MulFOp, arith::MulIOp>(def)) {
+      Value a = block->getArguments()[0];
+      Value b = block->getArguments()[1];
+      return (def->getOperand(0) == a && def->getOperand(1) == b) ||
+             (def->getOperand(0) == b && def->getOperand(1) == a);
+    }
+  }
+  return false;
+}
+
+/// Helper to detect x = x + a * b
+static bool matchSumOfMultOfArgs(linalg::GenericOp op) {
+  auto yieldOp = cast<linalg::YieldOp>(op.getRegion().front().getTerminator());
+  if (auto *def = yieldOp.getOperand(0).getDefiningOp()) {
+    if (isa<arith::AddFOp, arith::AddIOp>(def)) {
+      Value x = op.getBlock()->getArguments()[2];
+      return (def->getOperand(0) == x &&
+              matchMulOfArgs(op.getBlock(), def->getOperand(1))) ||
+             (def->getOperand(1) == x &&
+              matchMulOfArgs(op.getBlock(), def->getOperand(0)));
+    }
+  }
+  return false;
+}
+
 struct LinalgToKKPass
     : public impl::LinalgToKKPassBase<LinalgToKKPass> {
+
+  bool runOnSparse;
+  bool runOnDense;
+
+  LinalgToKKPass() : runOnSparse(true), runOnDense(true) {}
+  LinalgToKKPass(bool doSparse) : runOnSparse(doSparse), runOnDense(!doSparse) {}
 
   void runOnOperation() override {
     IRRewriter rewriter(&getContext());
     func::FuncOp func = getOperation();
+
     // Scan through for each supported op type
-    func.walk<WalkOrder::PostOrder>([&](linalg::MatmulOp matmul) {
-        llvm::outs() << "Found matmul op\n";
-        auto loc = matmul.getLoc();
-        rewriter.setInsertionPoint(matmul);
-        Value A = matmul.getInputs()[0];
-        Value B = matmul.getInputs()[1];
-        Value C = matmul.getOutputs()[0];
-        if(isDenseTensor(A) && isDenseTensor(B) && isDenseTensor(C)) {
-          llvm::outs() << "Operands dense so rewriting as gemm\n";
-          //Rewrite as GEMM call
-          SmallVector<Value> args;
-          args.push_back(A);
-          args.push_back(B);
-          args.push_back(C);
-          auto gemm = rewriter.create<kokkos::GemmOp>(loc, C.getType(), A, B, C);
-          rewriter.replaceOp(matmul, gemm);
-          //auto result = rewriter.create<emitc::CallOpaqueOp>(loc, C.getType(), "LAPIS::gemm", args).getResult(0);
-          //rewriter.replaceOpWithNewOp<bufferization::ToTensorOp>(matmul, result);
+    func.walk<WalkOrder::PostOrder>([&](linalg::GenericOp op) {
+      auto loc = op.getLoc();
+      rewriter.setInsertionPoint(op);
+      // Logic to detect spmv, spmm, gemm, gemv taken from SparseGPUCodegen.cpp
+      if (op.getNumDpsInits() != 1)
+        return; // reject multi-output
+
+      const unsigned numLoops = op.getNumLoops();
+      const unsigned numTensors = op->getNumOperands();
+      const auto iteratorTypes = op.getIteratorTypesArray();
+      SmallVector<AffineMap, 4> maps = op.getIndexingMapsArray();
+
+      using MapList = ArrayRef<ArrayRef<AffineExpr>>;
+      auto infer = [&](MapList m) {
+        return AffineMap::inferFromExprList(m, op.getContext());
+      };
+      AffineExpr i, j, k;
+      bindDims(&getContext(), i, j, k);
+
+      // Recognize a SpMV kernel.
+      if (numLoops == 2 && numTensors == 3 &&
+          linalg::isParallelIterator(iteratorTypes[0]) &&
+          linalg::isReductionIterator(iteratorTypes[1]) &&
+          maps == infer({{i, j}, {j}, {i}}) && matchSumOfMultOfArgs(op)) {
+        auto A = op.getOperand(0);
+        auto x = op.getOperand(1);
+        auto yin = op.getOperand(2);
+        if (runOnSparse && isCsrTensor(A) && isDenseTensor(x) && isDenseTensor(yin)) {
+          // spmv 
+          auto spmv = rewriter.create<kokkos::SpmvTensorOp>(loc, yin.getType(), A, x, yin);
+          rewriter.replaceOp(op, spmv);
         }
-        else if(isCsrTensor(A) && isDenseTensor(B) && isDenseTensor(C)) {
-          llvm::outs() << "Operand 0 sparse so rewriting as spmv\n";
-          //Rewrite as SpMM (spmv rank-2) call
-          auto spmv = rewriter.create<kokkos::SpmvOp>(loc, C.getType(), A, B, C);
-          rewriter.replaceOp(matmul, spmv);
+        else if (runOnDense && isDenseTensor(A) && isDenseTensor(x) && isDenseTensor(yin)) {
+          // gemv
+          auto gemv = rewriter.create<kokkos::GemvOp>(loc, yin.getType(), A, x, yin);
+          rewriter.replaceOp(op, gemv);
         }
-    });
-    func.walk<WalkOrder::PostOrder>([&](linalg::MatvecOp matvec) {
-        llvm::outs() << "Found matvec op\n";
-        auto loc = matvec.getLoc();
-        rewriter.setInsertionPoint(matvec);
-        Value A = matvec.getInputs()[0];
-        Value x = matvec.getInputs()[1];
-        Value y = matvec.getOutputs()[0];
-        if(isDenseTensor(A) && isDenseTensor(x) && isDenseTensor(y)) {
-          llvm::outs() << "Rewriting to gemv\n";
-          //Rewrite as GEMV call
-          auto call = rewriter.create<kokkos::GemvOp>(loc, y.getType(), A, x, y);
-          rewriter.replaceOp(matvec, call);
+      }
+      // Recognize a GEMM or SpMM kernel.
+      else if (numLoops == 3 && numTensors == 3 &&
+          linalg::isParallelIterator(iteratorTypes[0]) &&
+          linalg::isParallelIterator(iteratorTypes[1]) &&
+          linalg::isReductionIterator(iteratorTypes[2]) &&
+          maps == infer({{i, k}, {k, j}, {i, j}}) && matchSumOfMultOfArgs(op)) {
+        auto A = op.getOperand(0);
+        auto B = op.getOperand(1);
+        auto Cin = op.getOperand(2);
+        if (runOnSparse && isCsrTensor(A) && isDenseTensor(B) && isDenseTensor(Cin)) {
+          // SpMM
+          auto spmm = rewriter.create<kokkos::SpmvTensorOp>(loc, Cin.getType(), A, B, Cin);
+          rewriter.replaceOp(op, spmm);
         }
-        else if(isCsrTensor(A) && isDenseTensor(x) && isDenseTensor(y)) {
-          llvm::outs() << "Rewriting to spmv\n";
-          //Rewrite as SpMV call
-          auto spmv = rewriter.create<kokkos::SpmvOp>(loc, y.getType(), A, x, y);
-          rewriter.replaceOp(matvec, spmv);
+        else if (runOnDense && isDenseTensor(A) && isDenseTensor(B) && isDenseTensor(Cin)) {
+          // GEMM
+          auto gemm = rewriter.create<kokkos::GemmOp>(loc, Cin.getType(), A, B, Cin);
+          rewriter.replaceOp(op, gemm);
         }
+      }
     });
   }
 };
 
 std::unique_ptr<Pass> mlir::createLinalgToKKPass() {
   return std::make_unique<LinalgToKKPass>();
+}
+
+std::unique_ptr<Pass> mlir::createLinalgToKKSparsePass() {
+  return std::make_unique<LinalgToKKPass>(true);
+}
+
+std::unique_ptr<Pass> mlir::createLinalgToKKDensePass() {
+  return std::make_unique<LinalgToKKPass>(false);
 }
 

@@ -338,24 +338,32 @@ def AllocScratchOp : Kokkos_Op<"alloc_scratch">
 def GemmOp : Kokkos_Op<"gemm">
 {
   let summary = "KokkosKernels gemm";
-  let arguments = (ins AnyMemRef:$A, AnyMemRef:$B, AnyMemRef:$Cin);
-  let results = (outs AnyMemRef:$Cout);
+  let arguments = (ins AnyType:$A, AnyType:$B, AnyType:$Cin);
+  let results = (outs AnyType:$Cout);
   let hasVerifier = 0;
 }
 
 def GemvOp : Kokkos_Op<"gemv">
 {
   let summary = "KokkosKernels gemv";
-  let arguments = (ins AnyMemRef:$A, AnyMemRef:$x, AnyMemRef:$yin);
-  let results = (outs AnyMemRef:$yout);
+  let arguments = (ins AnyType:$A, AnyType:$x, AnyType:$yin);
+  let results = (outs AnyType:$yout);
+  let hasVerifier = 0;
+}
+
+def SpmvTensorOp : Kokkos_Op<"spmv_tensor">
+{
+  let summary = "KokkosKernels spmv (tensor level)";
+  let arguments = (ins AnyType:$A, AnyType:$x, AnyType:$yin);
+  let results = (outs AnyType:$yout);
   let hasVerifier = 0;
 }
 
 def SpmvOp : Kokkos_Op<"spmv">
 {
-  let summary = "KokkosKernels spmv";
-  let arguments = (ins AnyMemRef:$A, AnyMemRef:$x, AnyMemRef:$yin);
-  let results = (outs AnyMemRef:$yout);
+  let summary = "KokkosKernels spmv (memref level)";
+  let arguments = (ins AnyMemRef:$rowptrs, AnyMemRef:$entries, AnyMemRef:$values, AnyType:$shape, AnyType:$x, AnyType:$yin);
+  let results = (outs AnyType:$yout);
   let hasVerifier = 0;
 }
 

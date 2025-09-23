@@ -14,6 +14,7 @@
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
+#include "mlir/Dialect/SparseTensor/Transforms/Passes.h"
 
 namespace mlir {
 
@@ -22,7 +23,15 @@ namespace mlir {
 
 std::unique_ptr<Pass> createTransposeConstantFoldPass();
 
+std::unique_ptr<Pass> createLAPISSparsificationAndBufferizationPass(
+    SparseParallelizationStrategy parallelization, bool decompose, bool useKK);
+
+std::unique_ptr<Pass> createLAPISSparseCodegenPass();
+std::unique_ptr<Pass> createLAPISSparseCodegenPass(bool createDeallocs);
+
 std::unique_ptr<Pass> createLinalgToKKPass();
+std::unique_ptr<Pass> createLinalgToKKSparsePass();
+std::unique_ptr<Pass> createLinalgToKKDensePass();
 
 std::unique_ptr<Pass> createDenseLinalgToParallelLoopsPass();
 
