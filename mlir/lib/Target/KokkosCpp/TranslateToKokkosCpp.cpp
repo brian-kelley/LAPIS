@@ -1811,6 +1811,14 @@ static LogicalResult printOperation(KokkosCppEmitter &emitter, kokkos::TeamParal
   if(failed(emitter.emitValue(op.getTeamSizeHint())))
     return failure();
   emitter << ";\n";
+  emitter << "if constexpr(std::is_same_v<typename Kokkos::DefaultExecutionSpace::memory_space, Kokkos::HostSpace>) {\n";
+  // Do not use multiple threads per team on CPUs
+  emitter.ostream().indent();
+  emitter << teamSize << " = 1;\n";
+  emitter.ostream().unindent();
+  emitter << "}\n";
+  emitter << "else {\n";
+  emitter.ostream().indent();
   emitter << "if(" << teamSize << ") {\n";
   emitter.ostream().indent();
   // Team size hint was given, so just cap it at team_size_max
@@ -1832,6 +1840,8 @@ static LogicalResult printOperation(KokkosCppEmitter &emitter, kokkos::TeamParal
   else
     emitter << "Kokkos::ParallelForTag{}";
   emitter << ");\n";
+  emitter.ostream().unindent();
+  emitter << "}\n";
   emitter.ostream().unindent();
   emitter << "}\n";
   // Finally, launch the lambda with the correct policy.
@@ -1925,12 +1935,18 @@ static LogicalResult printOperation(KokkosCppEmitter &emitter, kokkos::ThreadPar
   emitter << ") : 8;\n";
   // Since we have a lambda and a vector length, we can now query a temporary TeamPolicy for the best team size
   std::string teamSize = "teamSize_" + emitter.getUniqueIdentifier();
-  emitter << "size_t " << teamSize << " = LAPIS::TeamPolicy(1, 1, " << vectorLength << ").team_size_recommended(" << lambda << ", ";
+  // Do not use multiple threads per team on CPUs
+  emitter << "size_t " << teamSize << " = 1;\n";
+  emitter << "if constexpr(!std::is_same_v<typename Kokkos::DefaultExecutionSpace::memory_space, Kokkos::HostSpace>) {\n";
+  emitter.ostream().indent();
+  emitter << teamSize << " = LAPIS::TeamPolicy(1, 1, " << vectorLength << ").team_size_recommended(" << lambda << ", ";
   if(isReduction)
     emitter << "Kokkos::ParallelReduceTag{}";
   else
     emitter << "Kokkos::ParallelForTag{}";
   emitter << ");\n";
+  emitter.ostream().unindent();
+  emitter << "}\n";
   // Get league size from team size and number of outer iters op performs
   std::string leagueSize = "leagueSize_" + emitter.getUniqueIdentifier();
   emitter << "size_t " << leagueSize << " = (";
