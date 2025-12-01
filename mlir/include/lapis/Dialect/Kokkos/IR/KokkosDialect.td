@@ -378,7 +378,7 @@ def ReLUOp : Kokkos_Op<"relu">
 def BatchNorm2DOp : Kokkos_Op<"batchnorm_2d">
 {
   let summary = "KokkosKernels batchnorm 2d";
-  let arguments = (ins AnyType:$input, AnyType:$scale, AnyType:$bias, AnyType:$mean, AnyType:$variance, F64Attr:$eps, F64Attr:$momentum);
+  let arguments = (ins AnyType:$input, AnyType:$scale, AnyType:$bias, AnyType:$mean, AnyType:$variance, FloatLike:$eps);
   let results = (outs AnyType:$out);
   let hasVerifier = 0;
 }

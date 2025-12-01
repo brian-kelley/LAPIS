@@ -80,6 +80,14 @@ static bool matchBatchNorm(linalg::GenericOp op) {
   return containsRsqrt;
 }
 
+static Value getBatchNormEps(linalg::GenericOp op) {
+  Value v;
+  op.walk<WalkOrder::PostOrder>([&](arith::TruncFOp trunc) {
+    v = trunc.getOperand();
+  });
+  return v;
+}
+
 // Match the first GenericOp emitted for adaptive average pool
 static bool matchAvgPool(linalg::GenericOp op) {
   int numSelects = 0;
@@ -116,6 +124,100 @@ struct KokkosDNNPass
     func.walk<WalkOrder::PostOrder>([&](linalg::GenericOp op) {
       auto loc = op.getLoc();
       rewriter.setInsertionPoint(op);
+      // Check for possible kernels
+      if(matchBias(op)) {
+        Type resultType = op->getResult(0).getType();
+        Value input = op->getOperand(0);
+        Value bias = op->getOperand(1);
+        auto newOp = rewriter.create<kokkos::BiasOp>(loc, resultType, input, bias);
+        rewriter.replaceOp(op, newOp);
+      }
+      else if(matchReLU(op)) {
+        Type resultType = op->getResult(0).getType();
+        Value input = op->getOperand(0);
+        auto newOp = rewriter.create<kokkos::ReLUOp>(loc, resultType, input);
+        rewriter.replaceOp(op, newOp);
+      }
+      else if(matchBatchNorm(op)) {
+        Type resultType = op->getResult(0).getType();
+        Value input = op->getOperand(0);
+        Value scale = op->getOperand(1);
+        Value bias = op->getOperand(2);
+        Value mean = op->getOperand(3);
+        Value variance = op->getOperand(4);
+        Value eps = getBatchNormEps(op);
+        auto newOp = rewriter.create<kokkos::BatchNorm2DOp>(loc, resultType, input, scale, bias, mean, variance, eps);
+        rewriter.replaceOp(op, newOp);
+      }
+    });
+    // Scan for known op types
+    func.walk<WalkOrder::PostOrder>([&](linalg::Conv2DNchwFchwOp op) {
+      // %26 = linalg.conv_2d_nchw_fchw {dilations = dense<1> : vector<2xi64>, strides = dense<2> : vector<2xi64>} ins(%padded_106, %cst_27 : tensor<64x64x58x58xf32>, tensor<128x64x3x3xf32>) outs(%25 : tensor<64x128x28x28xf32>) -> tensor<64x128x28x28xf32>
+      auto loc = op.getLoc();
+      rewriter.setInsertionPoint(op);
+      Type resultType = op->getResult(0).getType();
+      Value input = op->getOperand(0);
+      Value weights = op->getOperand(1);
+      // Check if input was the result of a pad.
+      // If so, we want to fold the pad into the kokkos.conv2d op.
+      // Otherwise, we assume the padding is 0 in both directions.
+      tensor::PadOp padOp = dyn_cast<tensor::PadOp>(input.getDefiningOp());
+      int padX = 0;
+      int padY = 0;
+      Value unpaddedInput = input;
+      if(padOp) {
+        unpaddedInput = padOp->getOperand(0);
+        auto padLow = padOp.getStaticLow();
+        auto padHigh = padOp.getStaticHigh();
+        if(padLow.size() != 4U || padHigh.size() != 4U) {
+          padOp.emitError("Expected tensor.pad (producing input to conv2d) to have 4D padding.");
+          return;
+        }
+        // Make sure pad is only in the expected dimensions
+        for(int i = 0; i < 2; i++) {
+          if(padLow[i] != 0 || padHigh[i] != 0) {
+            padOp.emitError("Did not expect tensor.pad to apply padding in batch/channel dimensions!");
+            return;
+          }
+        }
+        if(padLow[2] != padHigh[2] || padLow[3] != padHigh[3]) {
+          padOp.emitError("Expect tensor.pad to apply same padding to each side of tensor!");
+          return;
+        }
+        padX = padLow[2];
+        padY = padLow[3];
+      }
+      // Get stride information
+      SmallVector<int> strides;
+      {
+        auto stridesAttr = op.getStrides();
+        for(auto it = stridesAttr.begin(); it != stridesAttr.end(); it++) {
+          strides.push_back((int) (*it).getLimitedValue());
+        }
+      }
+      llvm::outs() << "Extracted strides for conv2d: ";
+      for(auto s : strides)
+        llvm::outs() << s << ' ';
+      llvm::outs() << '\n';
+      // Create new op, bypassing tensor.pad if there was one
+      auto newOp = rewriter.create<kokkos::Conv2DOp>(loc, resultType, unpaddedInput, weights, rewriter.getIndexAttr(strides[0]), rewriter.getIndexAttr(strides[1]), rewriter.getIndexAttr(padX), rewriter.getIndexAttr(padY));
+      rewriter.replaceOp(op, newOp);
+    });
+    // Delete all fill (initialization) ops since kokkosDNN doesn't need it
+    func.walk<WalkOrder::PostOrder>([&](linalg::FillOp op) {
+      bool isZero = false;
+      Value val = op.getInputs()[0];
+      if(auto cst = dyn_cast<arith::ConstantOp>(val.getDefiningOp())) {
+        Attribute attr = cst.getValue();
+        if(auto fattr = dyn_cast<FloatAttr>(attr)) {
+          isZero = fattr.getValue().isZero();
+        }
+      }
+      if(isZero) {
+        // Replace fill op's result usages by its input (an empty tensor)
+        rewriter.replaceOp(op, op.getOutputs()[0]);
+      }
+    });
 
       /*
       // Logic to detect spmv, spmm, gemm, gemv taken from SparseGPUCodegen.cpp
@@ -174,7 +276,6 @@ struct KokkosDNNPass
         }
       }
       */
-    });
   }
 };
 
