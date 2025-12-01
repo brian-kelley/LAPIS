@@ -152,7 +152,6 @@ struct KokkosDNNPass
     });
     // Scan for known op types
     func.walk<WalkOrder::PostOrder>([&](linalg::Conv2DNchwFchwOp op) {
-      // %26 = linalg.conv_2d_nchw_fchw {dilations = dense<1> : vector<2xi64>, strides = dense<2> : vector<2xi64>} ins(%padded_106, %cst_27 : tensor<64x64x58x58xf32>, tensor<128x64x3x3xf32>) outs(%25 : tensor<64x128x28x28xf32>) -> tensor<64x128x28x28xf32>
       auto loc = op.getLoc();
       rewriter.setInsertionPoint(op);
       Type resultType = op->getResult(0).getType();
@@ -203,6 +202,67 @@ struct KokkosDNNPass
       auto newOp = rewriter.create<kokkos::Conv2DOp>(loc, resultType, unpaddedInput, weights, rewriter.getIndexAttr(strides[0]), rewriter.getIndexAttr(strides[1]), rewriter.getIndexAttr(padX), rewriter.getIndexAttr(padY));
       rewriter.replaceOp(op, newOp);
     });
+    func.walk<WalkOrder::PostOrder>([&](linalg::PoolingNchwMaxOp op) {
+      auto loc = op.getLoc();
+      rewriter.setInsertionPoint(op);
+      Type resultType = op->getResult(0).getType();
+      Value input = op->getOperand(0);
+      int winX = 0;
+      int winY = 0;
+      {
+        // Expect window to be a rank-2 tensor with static shape
+        TensorType window = cast<TensorType>(op->getOperand(1).getType());
+        auto windowShape = window.getShape();
+        if(windowShape.size() != 2U) {
+          op.emitError("Expected 2D maxpool window to be a rank-2 tensor");
+        }
+        winX = windowShape[0];
+        winY = windowShape[1];
+      }
+      // Check if input was the result of a pad.
+      // If so, we want to fold the pad into the kokkos.conv2d op.
+      // Otherwise, we assume the padding is 0 in both directions.
+      tensor::PadOp padOp = dyn_cast<tensor::PadOp>(input.getDefiningOp());
+      int padX = 0;
+      int padY = 0;
+      Value unpaddedInput = input;
+      if(padOp) {
+        unpaddedInput = padOp->getOperand(0);
+        auto padLow = padOp.getStaticLow();
+        auto padHigh = padOp.getStaticHigh();
+        if(padLow.size() != 4U || padHigh.size() != 4U) {
+          padOp.emitError("Expected tensor.pad (producing input to conv2d) to have 4D padding.");
+          return;
+        }
+        // Make sure pad is only in the expected dimensions
+        for(int i = 0; i < 2; i++) {
+          if(padLow[i] != 0 || padHigh[i] != 0) {
+            padOp.emitError("Did not expect tensor.pad to apply padding in batch/channel dimensions!");
+            return;
+          }
+        }
+        if(padLow[2] != padHigh[2] || padLow[3] != padHigh[3]) {
+          padOp.emitError("Expect tensor.pad to apply same padding to each side of tensor!");
+          return;
+        }
+        padX = padLow[2];
+        padY = padLow[3];
+      }
+      // Get stride information
+      SmallVector<int> strides;
+      {
+        auto stridesAttr = op.getStrides();
+        for(auto it = stridesAttr.begin(); it != stridesAttr.end(); it++) {
+          strides.push_back((int) (*it).getLimitedValue());
+        }
+      }
+      llvm::outs() << "Extracted strides for conv2d: ";
+      for(auto s : strides)
+        llvm::outs() << s << ' ';
+      llvm::outs() << '\n';
+      auto newOp = rewriter.create<kokkos::MaxPool2DOp>(loc, resultType, unpaddedInput, rewriter.getIndexAttr(winX), rewriter.getIndexAttr(winY), rewriter.getIndexAttr(strides[0]), rewriter.getIndexAttr(strides[1]), rewriter.getIndexAttr(padX), rewriter.getIndexAttr(padY));
+      rewriter.replaceOp(op, newOp);
+    });
     func.walk<WalkOrder::PostOrder>([&](linalg::MatmulOp op) {
       auto loc = op.getLoc();
       rewriter.setInsertionPoint(op);
@@ -210,6 +270,28 @@ struct KokkosDNNPass
       auto newOp = rewriter.create<kokkos::MatmulOp>(loc, op.getResult(0).getType(), inputs[0], inputs[1]);
       rewriter.replaceOp(op, newOp);
     });
+    // Look for average pooling, which expands to multiple linalg ops
+    /*
+    while(true) {
+      bool foundMatches = false;
+      func.walk<WalkOrder::PostOrder>([&](linalg::GenericOp op) {
+        auto loc = op.getLoc();
+        rewriter.setInsertionPoint(op);
+        if(matchAvgPool(op)) {
+          // Find the actual, unpadded input to avgpool
+          Value inputPadded;
+          op.walk<WalkOrder::PostOrder>([&](tensor::ExtractOp op) {
+            inputPadded = op.getOperand(0);
+          });
+          auto padding = cast<tensor::PadOp>(inputPadded.getDefiningOp());
+          Value input = padding.getOperand(0);
+        }
+        auto inputs = op.getInputs();
+        auto newOp = rewriter.create<kokkos::MatmulOp>(loc, op.getResult(0).getType(), inputs[0], inputs[1]);
+        rewriter.replaceOp(op, newOp);
+      });
+    }
+    */
     // Delete all fill (zero-initialization) ops since kokkosDNN doesn't need it
     func.walk<WalkOrder::PostOrder>([&](linalg::FillOp op) {
       bool isZero = false;
@@ -231,64 +313,6 @@ struct KokkosDNNPass
         rewriter.eraseOp(op);
       }
     });
-
-      /*
-      // Logic to detect spmv, spmm, gemm, gemv taken from SparseGPUCodegen.cpp
-      if (op.getNumDpsInits() != 1)
-        return; // reject multi-output
-
-      const unsigned numLoops = op.getNumLoops();
-      const unsigned numTensors = op->getNumOperands();
-      const auto iteratorTypes = op.getIteratorTypesArray();
-      SmallVector<AffineMap, 4> maps = op.getIndexingMapsArray();
-
-      using MapList = ArrayRef<ArrayRef<AffineExpr>>;
-      auto infer = [&](MapList m) {
-        return AffineMap::inferFromExprList(m, op.getContext());
-      };
-      AffineExpr i, j, k;
-      bindDims(&getContext(), i, j, k);
-
-      // Recognize a SpMV kernel.
-      if (numLoops == 2 && numTensors == 3 &&
-          linalg::isParallelIterator(iteratorTypes[0]) &&
-          linalg::isReductionIterator(iteratorTypes[1]) &&
-          maps == infer({{i, j}, {j}, {i}}) && matchSumOfMultOfArgs(op)) {
-        auto A = op.getOperand(0);
-        auto x = op.getOperand(1);
-        auto yin = op.getOperand(2);
-        if (runOnSparse && isCsrTensor(A) && isDenseTensor(x) && isDenseTensor(yin)) {
-          // spmv 
-          auto spmv = rewriter.create<kokkos::SpmvTensorOp>(loc, yin.getType(), A, x, yin);
-          rewriter.replaceOp(op, spmv);
-        }
-        else if (runOnDense && isDenseTensor(A) && isDenseTensor(x) && isDenseTensor(yin)) {
-          // gemv
-          auto gemv = rewriter.create<kokkos::GemvOp>(loc, yin.getType(), A, x, yin);
-          rewriter.replaceOp(op, gemv);
-        }
-      }
-      // Recognize a GEMM or SpMM kernel.
-      else if (numLoops == 3 && numTensors == 3 &&
-          linalg::isParallelIterator(iteratorTypes[0]) &&
-          linalg::isParallelIterator(iteratorTypes[1]) &&
-          linalg::isReductionIterator(iteratorTypes[2]) &&
-          maps == infer({{i, k}, {k, j}, {i, j}}) && matchSumOfMultOfArgs(op)) {
-        auto A = op.getOperand(0);
-        auto B = op.getOperand(1);
-        auto Cin = op.getOperand(2);
-        if (runOnSparse && isCsrTensor(A) && isDenseTensor(B) && isDenseTensor(Cin)) {
-          // SpMM
-          auto spmm = rewriter.create<kokkos::SpmvTensorOp>(loc, Cin.getType(), A, B, Cin);
-          rewriter.replaceOp(op, spmm);
-        }
-        else if (runOnDense && isDenseTensor(A) && isDenseTensor(B) && isDenseTensor(Cin)) {
-          // GEMM
-          auto gemm = rewriter.create<kokkos::GemmOp>(loc, Cin.getType(), A, B, Cin);
-          rewriter.replaceOp(op, gemm);
-        }
-      }
-      */
   }
 };
 

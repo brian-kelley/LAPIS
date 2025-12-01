@@ -110,6 +110,7 @@ struct KokkosCppEmitter {
   // Emit a memref type as a Kokkos::View, with the given memory space (host, device, or DualView)
   LogicalResult emitMemrefType(Location loc, MemRefType type, kokkos::MemorySpace space);
   LogicalResult emitMemrefType(Location loc, UnrankedMemRefType type, kokkos::MemorySpace space);
+  LogicalResult emitTensorType(Location loc, TensorType type);
 
   // Emit a Kokkos::View type for a scratch view. This will be in AnonymousSpace, be unmanaged,
   // be LayoutRight, and always have static shape. A View of this type can be constructed with just
@@ -207,6 +208,9 @@ struct KokkosCppEmitter {
     KokkosCppEmitter &emitter;
   };
 
+  mutable llvm::DenseMap<Value, std::string> constantTensors;
+  mutable int constantTensorCount = 0;
+
   /// Returns wether the Value is assigned to a C++ variable in the scope.
   bool hasValueInScope(Value val);
 
@@ -292,9 +296,25 @@ struct KokkosCppEmitter {
     return span;
   }
 
+  static int64_t getTensorSpan(TensorType tensorType)
+  {
+    int64_t span = 1;
+    for(auto extent : tensorType.getShape())
+    {
+      span *= extent;
+    }
+    return span;
+  }
+
   bool emittingTeamLevel() const {
     return teamLevel;
   }
+
+  bool emittingModelGraph() const {
+    return doingModelGraph;
+  }
+
+  bool doingModelGraph = false;
 
 private:
   using ValueMapper = llvm::ScopedHashTable<Value, std::string>;
@@ -1091,6 +1111,9 @@ static LogicalResult printOperation(KokkosCppEmitter &emitter,
 
 static LogicalResult printOperation(KokkosCppEmitter &emitter,
                                     arith::ConstantOp constantOp) {
+  // Constant tensors for model graphs are emitted upfront
+  if(isa<TensorType>(constantOp.getResult().getType()))
+    return success();
   //Register the constant with the emitter so that it can replace usage of this variable with 
   //an equivalent literal. Don't need to declare the actual SSA variable.
   emitter.registerScalarConstant(constantOp.getResult(), constantOp);
@@ -4279,6 +4302,39 @@ LogicalResult KokkosCppEmitter::emitInitAndFinalize(bool finalizeKokkos = true)
     unindent();
     *this << "}\n";
   }
+  if(this->emittingModelGraph()) {
+    *this << "initModelGraph();\n";
+    for(auto& constantTensor : this->constantTensors)
+    {
+      Value val = constantTensor.first;
+      TensorType type = cast<TensorType>(val.getType());
+      Location loc = val.getDefiningOp()->getLoc();
+      std::string name = constantTensor.second;
+      *this << "{\n";
+      indent();
+      // We've already declared a global, mutable buffer with the initial data.
+      // The host representation of op can be an unmanaged view of this buffer, since
+      // we use LayoutRight for all views and the initial buffers are also LayoutRight.
+      //
+      // Only the device representation (if any) needs to be allocated now.
+      // Create temporary unmanaged host view, and copy to a new device view.
+      *this << "typename ";
+      if (failed(emitTensorType(loc, type)))
+        return failure();
+      *this << "::HostMirror " << name << "_host(" << name << "_initial);\n";
+      *this << name << " = ";
+      if (failed(emitTensorType(loc, type)))
+        return failure();
+      *this << "(Kokkos::view_alloc(Kokkos::WithoutInitializing, \"" << name << "\"));\n";
+      *this << "Kokkos::deep_copy(Kokkos::DefaultExecutionSpace(), " << name << ", " << name << "_host);\n";
+      unindent();
+      *this << "}\n";
+    }
+    // Declare workspace view
+    *this << "int64_t workspace_size = 0;\n";
+    *this << "modelGraph->get_workspace_size(workspace_size);\n";
+    *this << "workspace = Kokkos::View<char*>(\"workspace\", workspace_size);\n";
+  }
   unindent();
   *this << "}\n\n";
   *this << "extern \"C\" void lapis_finalize()\n";
@@ -4297,6 +4353,9 @@ LogicalResult KokkosCppEmitter::emitInitAndFinalize(bool finalizeKokkos = true)
         return failure();
       *this << "();\n";
     }
+  }
+  if(emittingModelGraph()) {
+    *this << "cudnnDestroy(cudnnHandle);\n";
   }
   if(!emittingTeamLevel()) {
     // Free views returned to Python
@@ -4391,6 +4450,9 @@ LogicalResult KokkosCppEmitter::emitType(Location loc, Type type, bool forSparse
   }
   if (auto mrType = dyn_cast<UnrankedMemRefType>(type)) {
     return emitMemrefType(loc, mrType, kokkos::MemorySpace::Host);
+  }
+  if (auto tensorType = dyn_cast<TensorType>(type)) {
+    return emitTensorType(loc, tensorType);
   }
   if (auto pType = dyn_cast<LLVM::LLVMPointerType>(type)) {
     // LLVMPointerType is untyped
@@ -4560,6 +4622,18 @@ LogicalResult KokkosCppEmitter::emitMemrefType(Location loc, MemRefType type, ko
   return success();
 }
 
+LogicalResult KokkosCppEmitter::emitTensorType(Location loc, TensorType type)
+{
+  *this << "Kokkos::View<";
+  if (failed(emitType(loc, type.getElementType())))
+    return failure();
+  for(auto extent : type.getShape()) {
+    *this << '[' << extent << ']';
+  }
+  *this << ", Kokkos::LayoutRight, Kokkos::DefaultExecutionSpace>";
+  return success();
+}
+
 LogicalResult KokkosCppEmitter::emitMemrefType(Location loc, UnrankedMemRefType type, kokkos::MemorySpace space)
 {
   if(space == kokkos::MemorySpace::DualView) {
@@ -4665,6 +4739,216 @@ inline void pauseForDebugger()
 #endif
 }
 
+static bool isModelGraph(Operation* op) {
+  bool usesTensors = false;
+  op->walk<WalkOrder::PostOrder>([&](func::FuncOp func) {
+    for(auto retType : func.getFunctionType().getResults()) {
+      if(isa<TensorType>(retType)) {
+        usesTensors = true;
+      }
+    }
+    for(auto argType : func.getArgumentTypes()) {
+      if(isa<TensorType>(argType)) {
+        usesTensors = true;
+      }
+    }
+  });
+  return usesTensors;
+}
+
+static LogicalResult printConstantTensor(KokkosCppEmitter &emitter, arith::ConstantOp op) {
+  emitter.pushStream();
+  emitter.selectDeclCppStream();
+  std::string name = std::string("constant_") + std::to_string(emitter.constantTensorCount++);
+  TensorType type = cast<TensorType>(op.getResult().getType());
+  Type elemType = type.getElementType();
+  // Declare constant Kokkos::View tensor
+  if(failed(emitter.emitTensorType(op.getLoc(), type)))
+    return failure();
+  emitter << ' ' << name << ";\n";
+  //Note: module-wide initialization will be responsible for allocating and copying the initializing data (if any).
+  //Then module-wide finalization will deallocate (to avoid Kokkos warning about dealloc after finalize).
+  Attribute value = op.getValue();
+  //For constants (initialized views), keep the actual data in a 1D array (with a related name).
+  if(failed(emitter.emitType(op.getLoc(), elemType)))
+    return failure();
+  int64_t span = KokkosCppEmitter::getTensorSpan(type);
+  emitter << ' ' << name << "_initial" << "[" << span << "] = ";
+  if (failed(emitter.emitAttribute(op.getLoc(), value)))
+    return failure();
+  emitter << ";\n";
+  //Register this in list of global views
+  emitter.constantTensors[op.getResult()] = name;
+  emitter.popStream();
+  return success();
+}
+
+static LogicalResult printModelFunction(KokkosCppEmitter &emitter, func::FuncOp func) {
+  auto funcName = func.getName().str();
+
+  // First, walk through function and emit/register all constant tensors
+  func->walk<WalkOrder::PostOrder>([&](arith::ConstantOp cst) {
+    if(isa<TensorType>(cst.getResult().getType())) {
+      (void) printConstantTensor(emitter, cst);
+    }
+  });
+  emitter << "void initModelGraph() {\n";
+  emitter.indent();
+  // Create the handle
+  emitter << "cudnnHandle = new cudnnHandle_t;\n";
+  emitter << "cudnnCreate(cudnnHandle);\n";
+  emitter << "modelGraph = new fe::graph::Graph;\n";
+  emitter << "modelGraph->set_io_data_type(fe::DataType_t::FLOAT);\n";
+  emitter << "modelGraph->set_intermediate_data_type(fe::DataType_t::FLOAT);\n";
+  emitter << "modelGraph->set_compute_data_type(fe::DataType_t::FLOAT);\n";
+  // Declare tensor inputs
+  for(BlockArgument input : func.getArguments()) {
+    auto argName = emitter.getOrCreateName(input);
+    TensorType type = cast<TensorType>(input.getType());
+    auto shape = type.getShape();
+    int rank = shape.size();
+    size_t stride = 1;
+    SmallVector<size_t> strides(rank);
+    for(int i = rank - 1; i >= 0; i--) {
+      strides[i] = stride;
+      stride *= shape[i];
+    }
+    emitter << "auto " << argName << " = modelGraph->tensor(fe::graph::Tensor_attributes().set_name(\"";
+    emitter << argName << "\").set_dim({";
+    for(int i = 0; i < rank; i++) {
+      if(i) emitter << ", ";
+      emitter << shape[i];
+    }
+    emitter << "}).set_stride({";
+    for(int i = 0; i < rank; i++) {
+      if(i) emitter << ", ";
+      emitter << strides[i];
+    }
+    emitter << "}));\n";
+  }
+  // Emit operations to build the graph
+  Region::BlockListType &blocks = func.getBlocks();
+  for (Block &block : blocks) {
+    for (Operation &op : block.getOperations()) {
+      if(auto matmul = dyn_cast<kokkos::MatmulOp>(&op)) {
+        emitter << "auto " << emitter.getOrCreateName(matmul.getC()) << " = modelGraph->matmul(";
+        emitter << emitter.getOrCreateName(matmul.getA()) << ", ";
+        emitter << emitter.getOrCreateName(matmul.getB()) << ", ";
+        emitter << "fe::graph::Matmul_attributes());\n";
+      }
+      else if(auto relu = dyn_cast<kokkos::ReLUOp>(&op)) {
+        emitter << "auto " << emitter.getOrCreateName(relu.getOut()) << " = modelGraph->pointwise(";
+        emitter << emitter.getOrCreateName(relu.getInput()) << ", ";
+        emitter << "fe::graph::Pointwise_attributes().set_mode(fe::PointwiseMode_t::RELU_FWD));\n";
+      }
+      else if(auto bias = dyn_cast<kokkos::BiasOp>(&op)) {
+        emitter << "auto " << emitter.getOrCreateName(bias.getOut()) << " = modelGraph->pointwise(";
+        emitter << emitter.getOrCreateName(bias.getInput()) << ", ";
+        emitter << emitter.getOrCreateName(bias.getBias()) << ", ";
+        emitter << "fe::graph::Pointwise_attributes().set_mode(fe::PointwiseMode_t::ADD));\n";
+      }
+      else if(auto ret = dyn_cast<func::ReturnOp>(&op)) {
+        // Mark the return argument as an output
+        for(auto operand : ret->getOperands())
+          emitter << emitter.getOrCreateName(operand) << "->set_output(true);\n";
+      }
+    }
+  }
+  emitter << "modelGraph->validate();\n";
+  emitter << "modelGraph->build_operation_graph(*cudnnHandle);\n";
+  emitter << "modelGraph->create_execution_plans({fe::HeurMode_t::A});\n";
+  emitter << "modelGraph->build_plans();\n";
+  emitter.unindent();
+  emitter << "}\n";
+
+  emitter.selectDeclCppStream();
+  auto emitDecl = [&]() -> LogicalResult {
+    emitter << "void " << funcName;
+    emitter << "(";
+    int i = 0;
+    for(Type t : func.getFunctionType().getResults()) {
+      if (failed(emitter.emitType(func->getLoc(), t)))
+        return failure();
+      emitter << " result" << i++ << ", ";
+    }
+    if (failed(emitter.emitFuncResultTypes(func->getLoc(), func.getFunctionType().getResults())))
+      return failure();
+    if (failed(interleaveCommaWithError(
+            func.getArguments(), emitter.ostream(),
+            [&](BlockArgument arg) -> LogicalResult {
+              if (failed(emitter.emitType(func->getLoc(), arg.getType())))
+                return failure();
+              emitter << " " << emitter.getOrCreateName(arg);
+              return success();
+            }))) {
+      return failure();
+    }
+    emitter << ")";
+    return success();
+  };
+  (void) emitDecl();
+  emitter << ";\n";
+  emitter.selectMainCppStream();
+  (void) emitDecl();
+  emitter << "{\n";
+  emitter.indent();
+  // Declare the data pointer mapping for tensors (inputs, outputs and constants)
+  emitter << "std::unordered_map<int64_t, void*> tensors;\n";
+  emitter << "setConstantTensors(tensors);\n";
+  //{X->get_uid(), x_tensor.devPtr}, {W->get_uid(), w_tensor.devPtr}, {Y->get_uid(), y_tensor.devPtr}};\n";
+
+  // Create label names for basic blocks.
+  for (Block &block : blocks) {
+    emitter.getOrCreateName(block);
+  }
+
+/*
+  KokkosCppEmitter::Scope scope(emitter);
+  // Declare variables for basic block arguments.
+  for (auto it = std::next(blocks.begin()); it != blocks.end(); ++it) {
+    Block &block = *it;
+    for (BlockArgument &arg : block.getArguments()) {
+      if (emitter.hasValueInScope(arg))
+        return func.emitOpError(" block argument #")
+               << arg.getArgNumber() << " is out of scope";
+      if (failed(
+              emitter.emitType(block.getParentOp()->getLoc(), arg.getType()))) {
+        return failure();
+      }
+      emitter << " " << emitter.getOrCreateName(arg) << ";\n";
+    }
+  }
+
+  for (Block &block : blocks) {
+    // Only print a label if the block has predecessors.
+    if (!block.hasNoPredecessors()) {
+      if (failed(emitter.emitLabel(block)))
+        return failure();
+    }
+    for (Operation &op : block.getOperations()) {
+      bool trailingSemicolon =
+          !isa<scf::IfOp, scf::ForOp, cf::CondBranchOp>(op);
+
+      if (failed(emitter.emitOperation(op, trailingSemicolon)))
+        return op.emitError("Failed to emit operation in block body");
+    }
+  }
+  */
+  emitter.unindent();
+  emitter << "}\n\n";
+  return success();
+}
+
+static LogicalResult emitModelGraph(KokkosCppEmitter& emitter, Operation* op) {
+  bool fail = false;
+
+  op->walk<WalkOrder::PostOrder>([&](func::FuncOp func) {
+    if(failed(printModelFunction(emitter, func)))
+      fail = true;
+  });
+  return fail ? failure() : success();
+}
+
 //Version for when we are just emitting C++
 LogicalResult kokkos::translateToKokkosCpp(Operation *op, raw_ostream* os, raw_ostream* header_os, llvm::StringRef header_path) {
   //Uncomment to pause so you can attach debugger
@@ -4674,27 +4958,49 @@ LogicalResult kokkos::translateToKokkosCpp(Operation *op, raw_ostream* os, raw_o
   llvm::raw_string_ostream cppDeclStream(cppDeclBuffer);
   llvm::raw_string_ostream cppStream(cppBuffer);
   KokkosCppEmitter emitter(cppDeclStream, cppStream, false);
-  emitter.selectDeclCppStream();
-  emitter.emitCppBoilerplate();
-  emitter.selectMainCppStream();
-  //Emit the actual module (global variables and functions)
-  if(failed(emitter.emitOperation(*op, /*trailingSemicolon=*/false)))
-    return failure();
-  // Emit the init and finalize function definitions.
-  if (failed(emitter.emitInitAndFinalize()))
-    return failure();
-  // If we were given a C++ header path, put the declarations there.
-  // Otherwise, they can go at the top of the main C++ file.
-  if(header_os) {
-    *header_os << "#ifndef LAPIS_MODULE_H\n";
-    *header_os << "#define LAPIS_MODULE_H\n";
-    *header_os << cppDeclBuffer;
-    *header_os << "#endif\n";
-    *os << "#include \"" << header_path << "\"\n";
-    *os << cppBuffer;
+  bool usesTensors = isModelGraph(op);
+  if(usesTensors) {
+    emitter.doingModelGraph = true;
+    llvm::outs() << "Using model graph path!\n";
+    emitter.selectDeclCppStream();
+    emitter.emitCppBoilerplate();
+    emitter << "#include <Kokkos_Core.hpp>\n\n";
+    emitter << "#include <cudnn_frontend.h>\n\n";
+    emitter << "#include <unordered_map>\n\n";
+    // Declare global graph and its workspace
+    emitter << "Kokkos::View<char*> workspace;\n";
+    emitter << "fe::graph::Graph* modelGraph = nullptr;\n";
+    emitter << "cudnnHandle_t* cudnnHandle = nullptr;\n";
+    emitter.selectMainCppStream();
+    if(failed(emitModelGraph(emitter, op)))
+      return failure();
+    if (failed(emitter.emitInitAndFinalize()))
+      return failure();
+    *os << cppDeclBuffer << cppBuffer;
   }
   else {
-    *os << cppDeclBuffer << cppBuffer;
+    emitter.selectDeclCppStream();
+    emitter.emitCppBoilerplate();
+    emitter.selectMainCppStream();
+    //Emit the actual module (global variables and functions)
+    if(failed(emitter.emitOperation(*op, /*trailingSemicolon=*/false)))
+      return failure();
+    // Emit the init and finalize function definitions.
+    if (failed(emitter.emitInitAndFinalize()))
+      return failure();
+    // If we were given a C++ header path, put the declarations there.
+    // Otherwise, they can go at the top of the main C++ file.
+    if(header_os) {
+      *header_os << "#ifndef LAPIS_MODULE_H\n";
+      *header_os << "#define LAPIS_MODULE_H\n";
+      *header_os << cppDeclBuffer;
+      *header_os << "#endif\n";
+      *os << "#include \"" << header_path << "\"\n";
+      *os << cppBuffer;
+    }
+    else {
+      *os << cppDeclBuffer << cppBuffer;
+    }
   }
   return success();
 }

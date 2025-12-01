@@ -394,7 +394,7 @@ def BatchNorm2DOp : Kokkos_Op<"batchnorm_2d">
 def MaxPool2DOp : Kokkos_Op<"maxpool_2d">
 {
   let summary = "KokkosKernels maxpool 2d";
-  let arguments = (ins AnyType:$input, IndexAttr:$windowX, IndexAttr:$windowY, IndexAttr:$strideX, IndexAttr:$strideY);
+  let arguments = (ins AnyType:$input, IndexAttr:$windowX, IndexAttr:$windowY, IndexAttr:$strideX, IndexAttr:$strideY, IndexAttr:$padX, IndexAttr:$padY);
   let results = (outs AnyType:$out);
   let hasVerifier = 0;
 }
