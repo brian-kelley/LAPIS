@@ -225,6 +225,12 @@ struct KokkosDNNPass
         rewriter.replaceOp(op, op.getOutputs()[0]);
       }
     });
+    // Delete tensor.empty ops with unused results. We no longer care about DPS.
+    func.walk<WalkOrder::PostOrder>([&](tensor::EmptyOp op) {
+      if(op.getResult().use_empty()) {
+        rewriter.eraseOp(op);
+      }
+    });
 
       /*
       // Logic to detect spmv, spmm, gemm, gemv taken from SparseGPUCodegen.cpp
