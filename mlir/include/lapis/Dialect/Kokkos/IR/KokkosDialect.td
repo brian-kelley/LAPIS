@@ -351,6 +351,14 @@ def GemvOp : Kokkos_Op<"gemv">
   let hasVerifier = 0;
 }
 
+def MatmulOp : Kokkos_Op<"matmul">
+{
+  let summary = "KokkosDNN matmul";
+  let arguments = (ins AnyType:$A, AnyType:$B);
+  let results = (outs AnyType:$C);
+  let hasVerifier = 0;
+}
+
 def Conv2DOp : Kokkos_Op<"conv_2d">
 {
   let summary = "KokkosKernels conv 2d";

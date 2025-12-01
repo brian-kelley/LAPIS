@@ -164,7 +164,8 @@ def KokkosDNN : Pass<"kokkos-dnn", "func::FuncOp"> {
     "sparse_tensor::SparseTensorDialect",
     "func::FuncDialect", 
     "tensor::TensorDialect",
-    "arith::ArithDialect"
+    "arith::ArithDialect",
+    "kokkos::KokkosDialect"
   ];
 }
 

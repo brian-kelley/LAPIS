@@ -203,7 +203,14 @@ struct KokkosDNNPass
       auto newOp = rewriter.create<kokkos::Conv2DOp>(loc, resultType, unpaddedInput, weights, rewriter.getIndexAttr(strides[0]), rewriter.getIndexAttr(strides[1]), rewriter.getIndexAttr(padX), rewriter.getIndexAttr(padY));
       rewriter.replaceOp(op, newOp);
     });
-    // Delete all fill (initialization) ops since kokkosDNN doesn't need it
+    func.walk<WalkOrder::PostOrder>([&](linalg::MatmulOp op) {
+      auto loc = op.getLoc();
+      rewriter.setInsertionPoint(op);
+      auto inputs = op.getInputs();
+      auto newOp = rewriter.create<kokkos::MatmulOp>(loc, op.getResult(0).getType(), inputs[0], inputs[1]);
+      rewriter.replaceOp(op, newOp);
+    });
+    // Delete all fill (zero-initialization) ops since kokkosDNN doesn't need it
     func.walk<WalkOrder::PostOrder>([&](linalg::FillOp op) {
       bool isZero = false;
       Value val = op.getInputs()[0];
