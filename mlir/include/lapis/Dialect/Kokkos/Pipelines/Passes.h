@@ -85,6 +85,8 @@ struct TeamLevelCompilerOptions
 // Building and Registering.
 //===----------------------------------------------------------------------===//
 
+void buildLAPISModelCompiler(OpPassManager &pm);
+
 /// Adds the "sparse-compiler-kokkos" pipeline to the `OpPassManager`.  This
 /// is the standard pipeline for taking sparsity-agnostic IR using
 /// the sparse-tensor type and lowering it to the Kokkos dialect with concrete

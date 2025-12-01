@@ -154,4 +154,18 @@ def KokkosMdrangeIteration : Pass<"kokkos-mdrange-iteration", "ModuleOp"> {
   ];
 }
 
+def KokkosDNN : Pass<"kokkos-dnn", "func::FuncOp"> {
+  let summary = "Compile model inference to a KokkosDNN graph";
+  let description = [{
+  }];
+  let constructor = "mlir::createKokkosDNNPass()";
+  let dependentDialects = [
+    "linalg::LinalgDialect",
+    "sparse_tensor::SparseTensorDialect",
+    "func::FuncDialect", 
+    "tensor::TensorDialect",
+    "arith::ArithDialect"
+  ];
+}
+
 #endif // MLIR_DIALECT_KOKKOS_TRANSFORMS_PASSES

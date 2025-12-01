@@ -351,6 +351,54 @@ def GemvOp : Kokkos_Op<"gemv">
   let hasVerifier = 0;
 }
 
+def Conv2DOp : Kokkos_Op<"conv_2d">
+{
+  let summary = "KokkosKernels conv 2d";
+  let arguments = (ins AnyType:$input, AnyType:$weights, IndexAttr:$strideX, IndexAttr:$strideY, IndexAttr:$padX, IndexAttr:$padY);
+  let results = (outs AnyType:$out);
+  let hasVerifier = 0;
+}
+
+def BiasOp : Kokkos_Op<"bias">
+{
+  let summary = "KokkosKernels bias";
+  let arguments = (ins AnyType:$input, AnyType:$bias);
+  let results = (outs AnyType:$out);
+  let hasVerifier = 0;
+}
+
+def ReLUOp : Kokkos_Op<"relu">
+{
+  let summary = "KokkosKernels relu";
+  let arguments = (ins AnyType:$input);
+  let results = (outs AnyType:$out);
+  let hasVerifier = 0;
+}
+
+def BatchNorm2DOp : Kokkos_Op<"batchnorm_2d">
+{
+  let summary = "KokkosKernels batchnorm 2d";
+  let arguments = (ins AnyType:$input, AnyType:$scale, AnyType:$bias, AnyType:$mean, AnyType:$variance, F64Attr:$eps, F64Attr:$momentum);
+  let results = (outs AnyType:$out);
+  let hasVerifier = 0;
+}
+
+def MaxPool2DOp : Kokkos_Op<"maxpool_2d">
+{
+  let summary = "KokkosKernels maxpool 2d";
+  let arguments = (ins AnyType:$input, IndexAttr:$windowX, IndexAttr:$windowY, IndexAttr:$strideX, IndexAttr:$strideY);
+  let results = (outs AnyType:$out);
+  let hasVerifier = 0;
+}
+
+def AvgPool2DOp : Kokkos_Op<"avgpool_2d">
+{
+  let summary = "KokkosKernels avgpool 2d";
+  let arguments = (ins AnyType:$input, IndexAttr:$windowX, IndexAttr:$windowY);
+  let results = (outs AnyType:$out);
+  let hasVerifier = 0;
+}
+
 def SpmvTensorOp : Kokkos_Op<"spmv_tensor">
 {
   let summary = "KokkosKernels spmv (tensor level)";

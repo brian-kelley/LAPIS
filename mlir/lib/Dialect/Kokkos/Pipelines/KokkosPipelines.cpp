@@ -235,6 +235,11 @@ void mlir::kokkos::buildTeamLevelKokkosCompiler(OpPassManager &pm, const TeamLev
   pm.addPass(createKokkosLoopMappingPass(true));
 }
 
+void mlir::kokkos::buildLAPISModelCompiler(OpPassManager &pm) {
+  pm.addPass(::mlir::createTransposeConstantFoldPass());
+  pm.addPass(createKokkosDNNPass());
+}
+
 //===----------------------------------------------------------------------===//
 // Pipeline registration.
 //===----------------------------------------------------------------------===//
@@ -250,5 +255,10 @@ void mlir::kokkos::registerKokkosPipelines() {
       "team-compiler-kokkos",
       "The pipeline for compiling dense models to team-level functions",
       buildTeamLevelKokkosCompiler);
+
+  PassPipelineRegistration<>(
+      "lapis-model-compiler",
+      "Pipeline for compiling inference of a model to an optimized graph",
+      buildLAPISModelCompiler);
 }
 

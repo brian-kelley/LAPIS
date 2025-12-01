@@ -49,6 +49,8 @@ std::unique_ptr<Pass> createKokkosDualViewManagementPass();
 
 std::unique_ptr<Pass> createKokkosMdrangeIterationPass();
 
+std::unique_ptr<Pass> createKokkosDNNPass();
+
 //===----------------------------------------------------------------------===//
 // Registration.
 //===----------------------------------------------------------------------===//
