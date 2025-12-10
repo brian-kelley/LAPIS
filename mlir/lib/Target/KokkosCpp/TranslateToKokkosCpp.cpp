@@ -4303,7 +4303,6 @@ LogicalResult KokkosCppEmitter::emitInitAndFinalize(bool finalizeKokkos = true)
     *this << "}\n";
   }
   if(this->emittingModelGraph()) {
-    *this << "initModelGraph();\n";
     for(auto& constantTensor : this->constantTensors)
     {
       Value val = constantTensor.first;
@@ -4330,10 +4329,6 @@ LogicalResult KokkosCppEmitter::emitInitAndFinalize(bool finalizeKokkos = true)
       unindent();
       *this << "}\n";
     }
-    // Declare workspace view
-    *this << "int64_t workspace_size = 0;\n";
-    *this << "modelGraph->get_workspace_size(workspace_size);\n";
-    *this << "workspace = Kokkos::View<char*>(\"workspace\", workspace_size);\n";
   }
   unindent();
   *this << "}\n\n";
@@ -4355,13 +4350,14 @@ LogicalResult KokkosCppEmitter::emitInitAndFinalize(bool finalizeKokkos = true)
     }
   }
   if(emittingModelGraph()) {
-    *this << "cudnnDestroy(cudnnHandle);\n";
+    *this << "modelGraph.reset();\n";
   }
-  if(!emittingTeamLevel()) {
+  if(!emittingTeamLevel() && !emittingModelGraph()) {
     // Free views returned to Python
     *this << "LAPIS::alives.clear();\n";
-    if(finalizeKokkos)
-      *this << "Kokkos::finalize();\n";
+  }
+  if(!emittingTeamLevel() && finalizeKokkos) {
+    *this << "Kokkos::finalize();\n";
   }
   unindent();
   *this << "}\n";
@@ -4431,7 +4427,7 @@ LogicalResult KokkosCppEmitter::emitType(Location loc, Type type, bool forSparse
   if (auto iType = dyn_cast<IndexType>(type))
     return (*this << "size_t"), success();
   if (auto tType = dyn_cast<TensorType>(type)) {
-    return emitError(loc, "cannot directly emit tensor type, should be lowered to memref");
+    return emitTensorType(loc, tType);
   }
   if (auto tType = dyn_cast<TupleType>(type))
     return emitTupleType(loc, tType.getTypes());
@@ -4785,81 +4781,16 @@ static LogicalResult printConstantTensor(KokkosCppEmitter &emitter, arith::Const
 
 static LogicalResult printModelFunction(KokkosCppEmitter &emitter, func::FuncOp func) {
   auto funcName = func.getName().str();
+  // Let one scope be active for the whole function
+  KokkosCppEmitter::Scope scope(emitter);
 
   // First, walk through function and emit/register all constant tensors
+  // (these are declared globally)
   func->walk<WalkOrder::PostOrder>([&](arith::ConstantOp cst) {
     if(isa<TensorType>(cst.getResult().getType())) {
       (void) printConstantTensor(emitter, cst);
     }
   });
-  emitter << "void initModelGraph() {\n";
-  emitter.indent();
-  // Create the handle
-  emitter << "cudnnHandle = new cudnnHandle_t;\n";
-  emitter << "cudnnCreate(cudnnHandle);\n";
-  emitter << "modelGraph = new fe::graph::Graph;\n";
-  emitter << "modelGraph->set_io_data_type(fe::DataType_t::FLOAT);\n";
-  emitter << "modelGraph->set_intermediate_data_type(fe::DataType_t::FLOAT);\n";
-  emitter << "modelGraph->set_compute_data_type(fe::DataType_t::FLOAT);\n";
-  // Declare tensor inputs
-  for(BlockArgument input : func.getArguments()) {
-    auto argName = emitter.getOrCreateName(input);
-    TensorType type = cast<TensorType>(input.getType());
-    auto shape = type.getShape();
-    int rank = shape.size();
-    size_t stride = 1;
-    SmallVector<size_t> strides(rank);
-    for(int i = rank - 1; i >= 0; i--) {
-      strides[i] = stride;
-      stride *= shape[i];
-    }
-    emitter << "auto " << argName << " = modelGraph->tensor(fe::graph::Tensor_attributes().set_name(\"";
-    emitter << argName << "\").set_dim({";
-    for(int i = 0; i < rank; i++) {
-      if(i) emitter << ", ";
-      emitter << shape[i];
-    }
-    emitter << "}).set_stride({";
-    for(int i = 0; i < rank; i++) {
-      if(i) emitter << ", ";
-      emitter << strides[i];
-    }
-    emitter << "}));\n";
-  }
-  // Emit operations to build the graph
-  Region::BlockListType &blocks = func.getBlocks();
-  for (Block &block : blocks) {
-    for (Operation &op : block.getOperations()) {
-      if(auto matmul = dyn_cast<kokkos::MatmulOp>(&op)) {
-        emitter << "auto " << emitter.getOrCreateName(matmul.getC()) << " = modelGraph->matmul(";
-        emitter << emitter.getOrCreateName(matmul.getA()) << ", ";
-        emitter << emitter.getOrCreateName(matmul.getB()) << ", ";
-        emitter << "fe::graph::Matmul_attributes());\n";
-      }
-      else if(auto relu = dyn_cast<kokkos::ReLUOp>(&op)) {
-        emitter << "auto " << emitter.getOrCreateName(relu.getOut()) << " = modelGraph->pointwise(";
-        emitter << emitter.getOrCreateName(relu.getInput()) << ", ";
-        emitter << "fe::graph::Pointwise_attributes().set_mode(fe::PointwiseMode_t::RELU_FWD));\n";
-      }
-      else if(auto bias = dyn_cast<kokkos::BiasOp>(&op)) {
-        emitter << "auto " << emitter.getOrCreateName(bias.getOut()) << " = modelGraph->pointwise(";
-        emitter << emitter.getOrCreateName(bias.getInput()) << ", ";
-        emitter << emitter.getOrCreateName(bias.getBias()) << ", ";
-        emitter << "fe::graph::Pointwise_attributes().set_mode(fe::PointwiseMode_t::ADD));\n";
-      }
-      else if(auto ret = dyn_cast<func::ReturnOp>(&op)) {
-        // Mark the return argument as an output
-        for(auto operand : ret->getOperands())
-          emitter << emitter.getOrCreateName(operand) << "->set_output(true);\n";
-      }
-    }
-  }
-  emitter << "modelGraph->validate();\n";
-  emitter << "modelGraph->build_operation_graph(*cudnnHandle);\n";
-  emitter << "modelGraph->create_execution_plans({fe::HeurMode_t::A});\n";
-  emitter << "modelGraph->build_plans();\n";
-  emitter.unindent();
-  emitter << "}\n";
 
   emitter.selectDeclCppStream();
   auto emitDecl = [&]() -> LogicalResult {
@@ -4871,8 +4802,6 @@ static LogicalResult printModelFunction(KokkosCppEmitter &emitter, func::FuncOp 
         return failure();
       emitter << " result" << i++ << ", ";
     }
-    if (failed(emitter.emitFuncResultTypes(func->getLoc(), func.getFunctionType().getResults())))
-      return failure();
     if (failed(interleaveCommaWithError(
             func.getArguments(), emitter.ostream(),
             [&](BlockArgument arg) -> LogicalResult {
@@ -4892,48 +4821,72 @@ static LogicalResult printModelFunction(KokkosCppEmitter &emitter, func::FuncOp 
   (void) emitDecl();
   emitter << "{\n";
   emitter.indent();
-  // Declare the data pointer mapping for tensors (inputs, outputs and constants)
-  emitter << "std::unordered_map<int64_t, void*> tensors;\n";
-  emitter << "setConstantTensors(tensors);\n";
-  //{X->get_uid(), x_tensor.devPtr}, {W->get_uid(), w_tensor.devPtr}, {Y->get_uid(), y_tensor.devPtr}};\n";
-
-  // Create label names for basic blocks.
-  for (Block &block : blocks) {
-    emitter.getOrCreateName(block);
+  // If the graph has not been constructed yet, build it
+  emitter << "if(!modelGraph) {\n";
+  emitter.indent();
+  emitter << "modelGraph = std::make_shared<KokkosDNN::Graph<float>>();\n";
+  // Add inputs
+  for(BlockArgument input : func.getArguments()) {
+    auto argName = emitter.getOrCreateName(input);
+    emitter << "auto " << argName << "_node = modelGraph->addInput(" << argName << ");\n";
   }
-
-/*
-  KokkosCppEmitter::Scope scope(emitter);
-  // Declare variables for basic block arguments.
-  for (auto it = std::next(blocks.begin()); it != blocks.end(); ++it) {
-    Block &block = *it;
-    for (BlockArgument &arg : block.getArguments()) {
-      if (emitter.hasValueInScope(arg))
-        return func.emitOpError(" block argument #")
-               << arg.getArgNumber() << " is out of scope";
-      if (failed(
-              emitter.emitType(block.getParentOp()->getLoc(), arg.getType()))) {
-        return failure();
-      }
-      emitter << " " << emitter.getOrCreateName(arg) << ";\n";
-    }
-  }
-
+  Region::BlockListType &blocks = func.getBlocks();
   for (Block &block : blocks) {
-    // Only print a label if the block has predecessors.
-    if (!block.hasNoPredecessors()) {
-      if (failed(emitter.emitLabel(block)))
-        return failure();
-    }
     for (Operation &op : block.getOperations()) {
-      bool trailingSemicolon =
-          !isa<scf::IfOp, scf::ForOp, cf::CondBranchOp>(op);
-
-      if (failed(emitter.emitOperation(op, trailingSemicolon)))
-        return op.emitError("Failed to emit operation in block body");
+      if(auto matmul = dyn_cast<kokkos::MatmulOp>(&op)) {
+        emitter << "auto " << emitter.getOrCreateName(matmul.getC()) << "_node = modelGraph->matmul(";
+        emitter << emitter.getOrCreateName(matmul.getA()) << "_node, ";
+        emitter << emitter.getOrCreateName(matmul.getB()) << "_node);\n";
+      }
+      else if(auto relu = dyn_cast<kokkos::ReLUOp>(&op)) {
+        emitter << "auto " << emitter.getOrCreateName(relu.getOut()) << "_node = modelGraph->relu(";
+        emitter << emitter.getOrCreateName(relu.getInput()) << "_node);\n";
+      }
+      else if(auto bias = dyn_cast<kokkos::BiasOp>(&op)) {
+        emitter << "auto " << emitter.getOrCreateName(bias.getOut()) << "_node = modelGraph->bias(";
+        emitter << emitter.getOrCreateName(bias.getInput()) << "_node, ";
+        emitter << emitter.getOrCreateName(bias.getBias()) << "_node);\n";
+      }
+      else if(auto cst = dyn_cast<arith::ConstantOp>(&op)) {
+        if(isa<TensorType>(cst.getResult().getType())) {
+          // Reference the global constant view
+          emitter << "auto " << emitter.getOrCreateName(cst.getResult()) << " = ";
+          emitter << emitter.constantTensors[cst.getResult()] << ";\n";
+          emitter << "auto " << emitter.getOrCreateName(cst.getResult()) << "_node = ";
+          emitter << "modelGraph->addConstant(" << emitter.getOrCreateName(cst.getResult()) << ");\n";
+        }
+        else {
+          // Declare a normal 
+          if(failed(printOperation(emitter, cst)))
+            return failure();
+        }
+      }
+      else if(auto ret = dyn_cast<func::ReturnOp>(&op)) {
+        // Mark the return argument as an output
+        int count = 0;
+        for(auto operand : ret->getOperands()) {
+          emitter << "modelGraph->addOutput(";
+          emitter << emitter.getOrCreateName(operand) << "_node, ";
+          emitter << "result" << count++ << ");\n";
+        }
+      }
     }
   }
-  */
+  emitter << "modelGraph->build();\n";
+  emitter.unindent();
+  emitter << "}\n";
+  // Now that graph is ready to use, bind input and output tensors and execute
+  {
+    int i = 0;
+    for(BlockArgument input : func.getArguments()) {
+      auto argName = emitter.getOrCreateName(input);
+      emitter << "modelGraph->bindInput(" << i << ", " << argName << ");\n";
+    }
+  }
+  for(size_t i = 0; i < func.getFunctionType().getResults().size(); i++) {
+    emitter << "modelGraph->bindOutput(" << i << ", result" << i << ");\n";
+  }
+  emitter << "modelGraph->execute();\n";
   emitter.unindent();
   emitter << "}\n\n";
   return success();
@@ -4963,14 +4916,11 @@ LogicalResult kokkos::translateToKokkosCpp(Operation *op, raw_ostream* os, raw_o
     emitter.doingModelGraph = true;
     llvm::outs() << "Using model graph path!\n";
     emitter.selectDeclCppStream();
-    emitter.emitCppBoilerplate();
-    emitter << "#include <Kokkos_Core.hpp>\n\n";
-    emitter << "#include <cudnn_frontend.h>\n\n";
+    emitter << "#include <Kokkos_Core.hpp>\n";
+    emitter << "#include \"KokkosDNN.hpp\"\n";
     emitter << "#include <unordered_map>\n\n";
     // Declare global graph and its workspace
-    emitter << "Kokkos::View<char*> workspace;\n";
-    emitter << "fe::graph::Graph* modelGraph = nullptr;\n";
-    emitter << "cudnnHandle_t* cudnnHandle = nullptr;\n";
+    emitter << "std::shared_ptr<KokkosDNN::Graph<float>> modelGraph;\n";
     emitter.selectMainCppStream();
     if(failed(emitModelGraph(emitter, op)))
       return failure();
