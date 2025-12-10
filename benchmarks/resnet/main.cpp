@@ -11,7 +11,7 @@ int main()
     ExecSpace().print_configuration(std::cout);
     Kokkos::Timer t;
     int numTrials = 100;
-    const int batchSize = 8;
+    const int batchSize = 64;
     // Construct inputs
     DualV input("images", batchSize, 3, 224, 224);
     {

@@ -4,12 +4,13 @@
 int main()
 {
   using ExecSpace = Kokkos::DefaultExecutionSpace;
-  using DualV = LAPIS::DualView<float[8748][91], Kokkos::LayoutRight>;
+  constexpr int batch = 100000;
+  using DualV = LAPIS::DualView<float[batch][91], Kokkos::LayoutRight>;
   lapis_initialize();
   {
     ExecSpace().print_configuration(std::cout);
     Kokkos::Timer t;
-    int numTrials = 10000;
+    int numTrials = 2;
     // Construct inputs
     DualV input(std::string("in_descriptors"));
     {
@@ -19,6 +20,10 @@ int main()
         for(int j = 0; j < 91; j++) {
           f >> input.host_view()(i, j);
         }
+      }
+      for(int i = 8748; i < batch; i++) {
+        for(int j = 0; j < 91; j++) {
+          input.host_view()(i, j) = input.host_view()(i % 8748, j);
       }
       f.close();
     }
