@@ -7,6 +7,7 @@ from torch_mlir.compiler_utils import TensorPlaceholder
 from torch_mlir import fx
 from torch_mlir import torchscript
 from lapis import KokkosBackend
+#from lapis_package.lapis_package import LAPISModule
 
 class SimpleNN(nn.Module):
   def __init__(self, input_size, hidden_size, output_size):
@@ -80,10 +81,11 @@ def main ():
     #print("Loss                :", loss.item())
     #print("Loss from LAPIS     :", lossKokkos.forward(dummyInput, dummyTarget))
 
-    print("Grad of layer 1 weights:", model.layer1.weight.grad)
-    print("Grad of layer 1 biases:", model.layer1.bias.grad)
-    print("Grad of layer 2 weights:", model.layer2.weight.grad)
-    print("Grad of layer 2 biases:", model.layer2.bias.grad)
+    print("** Torch param gradients **")
+    print("Grad of layer 1 weights:\n", model.layer1.weight.grad)
+    print("Grad of layer 1 biases:\n", model.layer1.bias.grad)
+    print("Grad of layer 2 weights:\n", model.layer2.weight.grad)
+    print("Grad of layer 2 biases:\n", model.layer2.bias.grad)
 
     # Can't convert parameter tensors (with gradients) to NumPy,
     # so make clean clones of them to pass to LAPIS module
@@ -99,11 +101,40 @@ def main ():
         output_type="linalg-on-tensors",
         func_name='loss',
     )
+
+    # Declare gradient tensors for calling Enzyme+LAPIS version
+    dl_dweight1 = torch.zeros(weight1.shape, requires_grad=False)
+    dl_dbias1 = torch.zeros(bias1.shape, requires_grad=False)
+    dl_dweight2 = torch.zeros(weight2.shape, requires_grad=False)
+    dl_dbias2 = torch.zeros(bias2.shape, requires_grad=False)
+    # and a 0D tensor for the forward loss value
+    lossval = torch.tensor(0)
+
+# void grad_loss(LAPIS::DualView<float[20][10], Kokkos::LayoutRight> v7, LAPIS::DualView<float[20][10], Kokkos::LayoutRight> v8, LAPIS::DualView<float[20], Kokkos::LayoutRight> v9, LAPIS::DualView<float[20], Kokkos::LayoutRight>      v10, LAPIS::DualView<float[5][20], Kokkos::LayoutRight> v11, LAPIS::DualView<float[5][20], Kokkos::LayoutRight> v12, LAPIS::DualView<float[5], Kokkos::LayoutRight> v13, LAPIS::DualView<float[5], Kokkos::LayoutRight> v14, LAPIS::DualView<float[8][10], Kokkos::LayoutRight> v15, LAPIS::DualView<float[8][5], Kokkos::LayoutRight> v16, LAPIS::DualView<float, Kokkos::LayoutRight> v17) {
+
+    #--enzyme-wrap="infn=loss outfn=grad_loss retTys=enzyme_active argTys=enzyme_dup,enzyme_dup,enzyme_dup,enzyme_dup,enzyme_const,enzyme_const mode=ReverseModeCombined"
     backend = KokkosBackend.KokkosBackend(dump_mlir=True)
-    lossKokkos = backend.compile(lossModule) # 'loss', 'grad_loss', ['active'], ['active', 'active', 'active', 'active', 'const', 'const'])
+    #lossKokkos = backend.compile(lossModule) # 'loss', 'grad_loss', ['active'], ['active', 'active', 'active', 'active', 'const', 'const'])
     print("Loss from SimpleNN_Loss.forward:", modelLoss.forward(weight1, bias1, weight2, bias2, dummyInput, dummyTarget).item())
-    print("Loss from LAPIS                :", lossKokkos.loss(weight1, bias1, weight2, bias2, dummyInput, dummyTarget))
-    #gradModule = backend.reverse_diff_compile(lossModule, 'loss', 'grad_loss', ['active'], ['active', 'active', 'active', 'active', 'const', 'const'])
+    #print("Loss from LAPIS                :", lossKokkos.loss(weight1, bias1, weight2, bias2, dummyInput, dummyTarget))
+    gradModule = backend.reverse_diff_compile(lossModule, 'loss', 'grad_loss', ['active'], ['dup', 'dup', 'dup', 'dup', 'const', 'const'])
+
+    #gradModule = LAPISModule('/media/bigdisk/LAPIS_Work/LAPIS/examples/Autodiff/lapis_package/build/liblapis_package_module.so')
+    gradModule.grad_loss(weight1, dl_dweight1, bias1, dl_dbias1, weight2, dl_dweight2, bias2, dl_dbias2, dummyInput, dummyTarget, lossval)
+
+    print("** Enzyme+LAPIS param gradients **")
+    print("Grad of layer 1 weights:")
+    print(weight1)
+    print(dl_dweight1)
+    print("Grad of layer 1 biases:")
+    print(bias1)
+    print(dl_dbias1)
+    print("Grad of layer 2 weights:")
+    print(weight2)
+    print(dl_dweight2)
+    print("Grad of layer 2 biases:")
+    print(bias2)
+    print(dl_dbias2)
     #modelKokkos = backend.compile_rev(lossExported)
 
     #inputPH = TensorPlaceholder([batch, input_size], torch.float32)
