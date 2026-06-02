@@ -121,6 +121,22 @@ class KokkosBackend:
         # And compile + load the module
         return self.compile_kokkos_to_native(moduleRoot, True)
 
+    # Note: cgeist supports ingesting either a single function or all functions ("*")
+    # For now, this interface supports just a single function.
+    # sysflags contains any additional flags (for example, to provide C++ stdlib headers) in order for cgeist to work.
+    def load_cpp(self, filename, function, sysflags=[]):
+        if 'KOKKOS_ROOT' not in os.environ:
+            raise Exception("load_cpp: Converting Kokkos C++ to MLIR requires $KOKKOS_ROOT to point to a valid Kokkos installation.")
+        cgeist=None
+        if 'CGEIST' in os.environ:
+            cgeist = os.environ['CGEIST']
+        else:
+            cgeist = shutil.which('cgeist')
+        if cgeist is None:
+            raise Exception("load_cpp: Could not find cgeist utility. Either add it to PATH or set $CGEIST to point to it directly.")
+        # Run cgeist on the given input file and capture only its output to stdout (containing the MLIR module)
+        return self.run_cli(cgeist, sysflags + ['-I', os.environ['KOKKOS_ROOT'] + '/include', filename, '--function=' + function, '--eliminate-polygeist-pointer', '--skip-licm', '-S'], "")
+
     def validate_activities(self, activities):
         pass
         #for a in activities:
