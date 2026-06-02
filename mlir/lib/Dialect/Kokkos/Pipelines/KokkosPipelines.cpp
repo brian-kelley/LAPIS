@@ -143,7 +143,7 @@ void mlir::kokkos::buildSparseKokkosCompiler(
   // Ensure all casts are realized.
   pm.addPass(createReconcileUnrealizedCastsPass());
 
-  pm.addPass(createKokkosMdrangeIterationPass());
+  //pm.addPass(createKokkosMdrangeIterationPass());
 
   // Finally, lower scf/memref to kokkos
   pm.addPass(createParallelUnitStepPass());
@@ -259,7 +259,7 @@ void mlir::kokkos::buildSparseKokkosCompilerPreAD(
 
 void mlir::kokkos::buildSparseKokkosCompilerPostAD(
     OpPassManager &pm) {
-  pm.addPass(createKokkosMdrangeIterationPass());
+  //pm.addPass(createKokkosMdrangeIterationPass());
 
   // Finally, lower scf/memref to kokkos
   pm.addPass(createParallelUnitStepPass());
