@@ -24,6 +24,7 @@ declare_mlir_python_sources(LapisPythonSources.kokkos_backend
   ADD_TO_PARENT LapisPythonSources
   SOURCES
     KokkosBackend.py
+    translate_old_to_new_mlir.py
 )
 
 set(_source_components

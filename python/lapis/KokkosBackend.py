@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 #import torch
 from shutil import which
+from lapis.translate_old_to_new_mlir import translate_old_to_new_mlir
 
 class KokkosBackend:
     """Main entry-point for the Kokkos backend for linalg-on-tensors dense/sparse code."""
@@ -135,7 +136,9 @@ class KokkosBackend:
         if cgeist is None:
             raise Exception("load_cpp: Could not find cgeist utility. Either add it to PATH or set $CGEIST to point to it directly.")
         # Run cgeist on the given input file and capture only its output to stdout (containing the MLIR module)
-        return self.run_cli(cgeist, sysflags + ['-I', os.environ['KOKKOS_ROOT'] + '/include', filename, '--function=' + function, '--eliminate-polygeist-pointer', '--skip-licm', '-S'], "")
+        module = self.run_cli(cgeist, sysflags + ['-I', os.environ['KOKKOS_ROOT'] + '/include', filename, '--function=' + function, '--eliminate-polygeist-pointer', '--skip-licm', '-S'], "")
+        module = translate_old_to_new_mlir(module)
+        return module
 
     def validate_activities(self, activities):
         pass
